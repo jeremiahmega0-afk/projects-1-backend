@@ -61,10 +61,24 @@ const resetPasswordSchema = z.object({
     .min(6, "Password must be at least 6 characters")
     .max(100, "Password is too long"),
 }).strict();
+
+const changePasswordSchema = z.object({
+  currentPassword: z
+    .string()
+    .min(1, "Current password is required")
+    .max(100, "Password is too long"),
+
+  newPassword: z
+    .string()
+    .min(6, "New password must be at least 6 characters")
+    .max(100, "New password is too long"),
+}).strict();
+
 module.exports = {
   registerSchema,
   loginSchema,
   emailSchema,
   verifyAccountSchema,
   resetPasswordSchema,
+  changePasswordSchema,
 };

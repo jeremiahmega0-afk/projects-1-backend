@@ -6,12 +6,14 @@ const generateToken = require("../utils/generateToken");
 const Verification = require("../models/verification.model");
 const generateOtp = require("../utils/generateOtp");
 const generateRefreshToken = require("../utils/generateRefreshToken");
+const hashToken = require("../utils/hashToken");
 const {
   registerSchema,
   loginSchema,
   emailSchema,
   resetPasswordSchema,
   verifyAccountSchema,
+   changePasswordSchema,
 } = require("../validations/auth.validation");
 
 const register = async (req, res) => {
@@ -123,11 +125,11 @@ const login = async (req, res) => {
       sameSite: "strict",
       maxAge: 7 * 24 * 60 * 60 * 1000,
     });
-    await RefreshToken.create({
-      token: refreshToken,
-      user: user._id,
-      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-    });
+   await RefreshToken.create({
+  token: hashToken(refreshToken),
+  user: user._id,
+  expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+});
     // Login successful
     res.status(200).json({
       success: true,
@@ -402,11 +404,24 @@ const resetPassword = async (req, res) => {
       12
     );
 
-    user.password = hashedPassword;
+   
+user.password = hashedPassword;
 
-    await user.save();
+await user.save();
 
-    await Verification.deleteOne({ email });
+// Revoke all refresh tokens for this user
+await RefreshToken.updateMany(
+  {
+    user: user._id,
+    revoked: false,
+  },
+  {
+    $set: { revoked: true },
+  }
+);
+
+await Verification.deleteOne({ email });
+
 
     res.status(200).json({
       success: true,
@@ -421,6 +436,92 @@ const resetPassword = async (req, res) => {
     });
   }
 };
+
+const changePassword = async (req, res) => {
+  try {
+    const validation = changePasswordSchema.safeParse(req.body);
+
+    if (!validation.success) {
+      return res.status(400).json({
+        success: false,
+        message: validation.error.issues[0].message,
+      });
+    }
+
+    const { currentPassword, newPassword } = validation.data;
+
+    // Find the logged-in user
+    const user = await User.findById(req.user.id);
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      });
+    }
+
+    // Verify the current password
+    const isPasswordCorrect = await bcrypt.compare(
+      currentPassword,
+      user.password
+    );
+
+    if (!isPasswordCorrect) {
+      return res.status(401).json({
+        success: false,
+        message: "Current password is incorrect",
+      });
+    }
+
+    // Prevent changing to the same password
+    const isSamePassword = await bcrypt.compare(
+      newPassword,
+      user.password
+    );
+
+    if (isSamePassword) {
+      return res.status(400).json({
+        success: false,
+        message: "New password must be different",
+      });
+    }
+
+    // Hash and save the new password
+    user.password = await bcrypt.hash(newPassword, 12);
+    await user.save();
+
+    // Revoke all active refresh tokens for this user
+    await RefreshToken.updateMany(
+      {
+        user: user._id,
+        revoked: false,
+      },
+      {
+        $set: { revoked: true },
+      }
+    );
+
+    // Clear this browser's refresh-token cookie
+    res.clearCookie("refreshToken", {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "strict",
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Password changed successfully. Please log in again.",
+    });
+  } catch (error) {
+    console.error(error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong",
+    });
+  }
+};
+
 const refreshAccessToken = async (req, res) => {
   try {
     const refreshToken = req.cookies.refreshToken;
@@ -438,10 +539,9 @@ const refreshAccessToken = async (req, res) => {
       process.env.JWT_REFRESH_SECRET
     );
 
-    // 2. Check if this refresh token exists in MongoDB
     const storedToken = await RefreshToken.findOne({
-      token: refreshToken,
-    });
+  token: hashToken(refreshToken),
+});
 
     if (!storedToken) {
       return res.status(401).json({
@@ -476,17 +576,36 @@ const refreshAccessToken = async (req, res) => {
       });
     }
 
-    // Revoke the old refresh token
-    storedToken.revoked = true;
-    await storedToken.save();
+   const revokedToken = await RefreshToken.findOneAndUpdate(
+  {
+    _id: storedToken._id,
+    revoked: false,
+    expiresAt: { $gt: new Date() },
+  },
+  {
+    $set: { revoked: true },
+  },
+  {
+      returnDocument: "before",
+  }
+);
+
+if (!revokedToken) {
+  return res.status(401).json({
+    success: false,
+    message: "Refresh token has already been used or expired",
+  });
+}
 
     const newRefreshToken = generateRefreshToken(user);
 
-    await RefreshToken.create({
-      token: newRefreshToken,
-      user: user._id,
-      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-    });
+   
+await RefreshToken.create({
+  token: hashToken(newRefreshToken),
+  user: user._id,
+  expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+});
+
     res.cookie("refreshToken", newRefreshToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
@@ -508,20 +627,22 @@ const refreshAccessToken = async (req, res) => {
     });
   }
 };
+
 const logout = async (req, res) => {
   try {
     const refreshToken = req.cookies.refreshToken;
 
-    if (refreshToken) {
-      const storedToken = await RefreshToken.findOne({
-        token: refreshToken,
-      });
+    
+await RefreshToken.findOneAndUpdate(
+  {
+    token: hashToken(refreshToken),
+    revoked: false,
+  },
+  {
+    $set: { revoked: true },
+  }
+);
 
-      if (storedToken) {
-        storedToken.revoked = true;
-        await storedToken.save();
-      }
-    }
 
     res.clearCookie("refreshToken", {
       httpOnly: true,
@@ -542,6 +663,7 @@ const logout = async (req, res) => {
     });
   }
 };
+
 module.exports = {
   register,
   login,
@@ -550,5 +672,6 @@ module.exports = {
   refreshAccessToken,
   forgotPassword,
   resetPassword,
+  changePassword,
    logout,
 };
