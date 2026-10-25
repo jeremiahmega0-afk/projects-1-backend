@@ -10,6 +10,7 @@ const authRoutes = require("./routes/auth.routes");
 const userRoutes = require("./routes/user.routes");
 const articleRoutes = require("./routes/article.routes");
 const categoryRoutes = require("./routes/category.routes");
+const commentRoutes = require("./routes/comment.routes");
 
 const {
   notFound,
@@ -37,6 +38,7 @@ app.use("/api/v1/auth", authRoutes);
 app.use("/api/v1/users", userRoutes);
 app.use("/api/v1/articles", articleRoutes);
 app.use("/api/v1/categories", categoryRoutes);
+app.use("/api/v1/comments", commentRoutes);
 
 app.use(notFound);
 app.use(errorHandler);
