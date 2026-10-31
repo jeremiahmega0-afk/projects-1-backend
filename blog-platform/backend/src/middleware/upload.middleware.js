@@ -1,6 +1,5 @@
 
 const multer = require("multer");
-
 const allowedTypes = [
   "image/jpeg",
   "image/png",
@@ -11,6 +10,7 @@ const allowedTypes = [
   "audio/mpeg",
   "audio/mp4",
   "audio/wav",
+  "video/webm",
 ];
 
 const upload = multer({
@@ -21,13 +21,17 @@ const upload = multer({
     files: 1,
   },
 
-  fileFilter: (req, file, callback) => {
-    if (!allowedTypes.includes(file.mimetype)) {
-      return callback(new Error("File type is not allowed"));
-    }
+ fileFilter: (req, file, callback) => {
+  console.log("Uploaded MIME type:", file.mimetype);
 
-    callback(null, true);
-  },
+  const mimeType = file.mimetype.split(";")[0].trim();
+
+  if (!allowedTypes.includes(mimeType)) {
+    return callback(new Error("File type is not allowed"));
+  }
+
+  callback(null, true);
+},
 });
 
 module.exports = upload;

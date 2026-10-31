@@ -156,6 +156,7 @@ const uploadCommentMedia = async (req, res, next) => {
     // 2. Check the file's real format
     const { fileTypeFromBuffer } = await import("file-type");
     const detectedType = await fileTypeFromBuffer(req.file.buffer);
+    console.log("Detected file type:", detectedType);
 
     const allowedImageTypes = [
       "image/jpeg",
@@ -166,6 +167,7 @@ const uploadCommentMedia = async (req, res, next) => {
 
     const allowedAudioTypes = [
       "audio/webm",
+      "video/webm",
       "audio/ogg",
       "audio/mpeg",
       "audio/mp4",

@@ -122,11 +122,19 @@ const getArticleBySlug = async (req, res) => {
     });
   }
 };
+
 const updateArticle = async (req, res) => {
   try {
-    const validationResult = {
-      data: req.body,
-    };
+    // 1. Validate the request body
+    const validationResult = updateArticleSchema.safeParse(req.body);
+
+    if (!validationResult.success) {
+      return res.status(400).json({
+        success: false,
+        message: "Validation failed",
+        errors: validationResult.error.issues,
+      });
+    }
 
     const {
       title,
@@ -136,7 +144,7 @@ const updateArticle = async (req, res) => {
       status,
     } = validationResult.data;
 
-
+    // 2. Validate the article ID
     const { id } = req.params;
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -146,8 +154,8 @@ const updateArticle = async (req, res) => {
       });
     }
 
+    // 3. Find the article
     const article = await Article.findById(id);
-
 
     if (!article) {
       return res.status(404).json({
@@ -156,11 +164,56 @@ const updateArticle = async (req, res) => {
       });
     }
 
+    // 4. Check ownership BEFORE changing anything
+    const articleAuthorId = article.author.toString();
+    const loggedInUserId = req.user?.id?.toString();
+
+    if (!loggedInUserId) {
+      return res.status(401).json({
+        success: false,
+        message: "Authentication required",
+      });
+    }
+
+    if (articleAuthorId !== loggedInUserId) {
+      return res.status(403).json({
+        success: false,
+        message: "You can only update your own articles",
+      });
+    }
+
+    // 5. Validate the category before updating
+    if (category !== undefined && category !== "") {
+      if (!mongoose.Types.ObjectId.isValid(category)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid category ID",
+        });
+      }
+
+      const categoryExists = await Category.findById(category);
+
+      if (!categoryExists) {
+        return res.status(404).json({
+          success: false,
+          message: "Category not found",
+        });
+      }
+    }
+
+    // 6. Generate and check the new slug
     if (title !== undefined && title !== article.title) {
       const newSlug = slugify(title, {
         lower: true,
         strict: true,
       });
+
+      if (!newSlug) {
+        return res.status(400).json({
+          success: false,
+          message: "Title must contain letters or numbers",
+        });
+      }
 
       const existingArticle = await Article.findOne({
         slug: newSlug,
@@ -174,37 +227,23 @@ const updateArticle = async (req, res) => {
         });
       }
 
-      article.title = title;
       article.slug = newSlug;
     }
 
-
-
-    if (article.author.toString() !== req.user.id) {
-      return res.status(403).json({
-        success: false,
-        message: "You can only update your own articles",
-      });
-    }
-    if (!article) {
-      return res.status(404).json({
-        success: false,
-        message: "Article not found",
-      });
-    }
-
+    // 7. Detect content changes
     const contentChanged =
       title !== undefined ||
       content !== undefined ||
       coverImage !== undefined ||
       category !== undefined;
 
+    // Send edited published articles back for review
     if (article.status === "published" && contentChanged) {
       article.status = "pending";
       article.publishedAt = null;
     }
 
-
+    // 8. Apply permitted changes
     if (title !== undefined) {
       article.title = title;
     }
@@ -217,50 +256,22 @@ const updateArticle = async (req, res) => {
       article.coverImage = coverImage;
     }
 
-
     if (category !== undefined) {
-      if (
-        category &&
-        !mongoose.Types.ObjectId.isValid(category)
-      ) {
-        return res.status(400).json({
-          success: false,
-          message: "Invalid category ID",
-        });
-      }
-      if (category) {
-
-        const categoryExists = await Category.findById(category);
-
-        if (!categoryExists) {
-          return res.status(404).json({
-            success: false,
-            message: "Category not found",
-          });
-        }
-      }
-
-      article.category = category;
+      article.category = category || null;
     }
-
 
     if (status !== undefined) {
       article.status = status;
-    }
-
-    if (status !== undefined) {
-      if (status === "published" && !article.publishedAt) {
-        article.publishedAt = new Date();
-      }
 
       if (status === "draft") {
         article.publishedAt = null;
       }
     }
 
+    // 9. Save only after all checks pass
     await article.save();
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       message: "Article updated successfully",
       article,
@@ -268,15 +279,16 @@ const updateArticle = async (req, res) => {
   } catch (error) {
     console.error(error);
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: "Something went wrong",
     });
   }
 };
+
+
 const deleteArticle = async (req, res) => {
   try {
-
     const { id } = req.params;
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -295,28 +307,39 @@ const deleteArticle = async (req, res) => {
       });
     }
 
-    if (article.author.toString() !== req.user.id) {
+    const articleAuthorId = article.author.toString();
+    const loggedInUserId = req.user?.id?.toString();
+
+    if (!loggedInUserId) {
+      return res.status(401).json({
+        success: false,
+        message: "Authentication required",
+      });
+    }
+
+    if (articleAuthorId !== loggedInUserId) {
       return res.status(403).json({
         success: false,
         message: "You can only delete your own articles",
       });
     }
 
-    await Article.findByIdAndDelete(id);
+    await article.deleteOne();
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       message: "Article deleted successfully",
     });
   } catch (error) {
     console.error(error);
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: "Something went wrong",
     });
   }
 };
+
 const getAllArticlesForAdmin = async (req, res) => {
   try {
     const articles = await Article.find()
