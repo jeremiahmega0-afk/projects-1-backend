@@ -1,32 +1,30 @@
 
 const express = require("express");
-const upload = require("../middleware/upload.middleware");
+
 const protect = require("../middleware/auth.middleware");
+const validate = require("../middleware/validate.middleware");
 
 const {
+  createCommentSchema,
+} = require("../validations/comment.validation");
+const {
   createComment,
-  getComments,
-  updateComment,
-  uploadCommentMedia,
+  getArticleComments,
 } = require("../controllers/comment.controller");
-
 
 const router = express.Router();
 
-// Only logged-in users can comment
+// Create a comment on an article
 router.post(
   "/:articleId",
   protect,
+  validate(createCommentSchema),
   createComment
 );
-router.get("/:articleId", getComments);
-
-router.patch("/:commentId", protect, updateComment);
-
-router.post(
-  "/:articleId/media",
-  protect,
-  upload.single("file"),
-  uploadCommentMedia
+// Get approved comments for an article
+router.get(
+  "/:articleId",
+  getArticleComments
 );
 module.exports = router;
+

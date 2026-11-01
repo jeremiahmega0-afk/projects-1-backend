@@ -72,22 +72,67 @@ const createArticle = async (req, res) => {
 };
 const getArticles = async (req, res) => {
   try {
-    const articles = await Article.find({
-      status: "published",
-    })
-      .populate("category", "name slug description")
-      .populate("author", "name email avatar")
-      .sort({ createdAt: -1 });
+    const { search, category, page = 1, limit = 10 } = req.query;
 
-    res.status(200).json({
+    // Convert page and limit into numbers
+    const pageNumber = Math.max(1, Number(page) || 1);
+    const limitNumber = Math.min(
+      50,
+      Math.max(1, Number(limit) || 10)
+    );
+
+    // Always show published articles only
+    const filter = {
+      status: "published",
+    };
+
+    // Search articles by title
+    if (search) {
+      filter.title = {
+        $regex: search,
+        $options: "i",
+      };
+    }
+
+    // Filter articles by category
+    if (category) {
+      if (!mongoose.Types.ObjectId.isValid(category)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid category ID",
+        });
+      }
+
+      filter.category = category;
+    }
+
+    // Calculate how many articles to skip
+    const skip = (pageNumber - 1) * limitNumber;
+
+    // Get articles and total number of matching articles
+    const [articles, totalArticles] = await Promise.all([
+      Article.find(filter)
+        .populate("category", "name slug description")
+        .populate("author", "name email avatar")
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limitNumber),
+
+      Article.countDocuments(filter),
+    ]);
+
+    return res.status(200).json({
       success: true,
       count: articles.length,
+      totalArticles,
+      currentPage: pageNumber,
+      totalPages: Math.ceil(totalArticles / limitNumber),
       articles,
     });
   } catch (error) {
     console.error(error);
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: "Something went wrong",
     });
@@ -123,6 +168,52 @@ const getArticleBySlug = async (req, res) => {
   }
 };
 
+const getMyArticleById = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Check whether the article ID is valid
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid article ID",
+      });
+    }
+
+    // Find the article
+    const article = await Article.findById(id)
+      .populate("category", "name slug description")
+      .populate("author", "name email avatar");
+
+    // Check whether the article exists
+    if (!article) {
+      return res.status(404).json({
+        success: false,
+        message: "Article not found",
+      });
+    }
+
+    // Check whether the logged-in user owns the article
+    if (article.author._id.toString() !== req.user.id.toString()) {
+      return res.status(403).json({
+        success: false,
+        message: "You can only view your own articles",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      article,
+    });
+  } catch (error) {
+    console.error(error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong",
+    });
+  }
+};
 const updateArticle = async (req, res) => {
   try {
     // 1. Validate the request body
@@ -456,6 +547,7 @@ module.exports = {
   createArticle,
   getArticles,
   getArticleBySlug,
+  getMyArticleById,
   updateArticle,
   deleteArticle,
   getAllArticlesForAdmin,

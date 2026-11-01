@@ -3,32 +3,37 @@ const mongoose = require("mongoose");
 
 const commentSchema = new mongoose.Schema(
   {
-    content: {
-      type: String,
-      trim: true,
-      maxlength: 2000,
-      default: "",
-    },
-
     type: {
       type: String,
-      enum: ["text", "image", "audio", "sticker", "mixed"],
+      enum: ["text", "sticker", "audio"],
+      required: true,
       default: "text",
     },
 
-    imageUrl: {
+    content: {
       type: String,
+      trim: true,
+      maxlength: 1000,
+      default: "",
+    },
+
+    stickerUrl: {
+      type: String,
+      trim: true,
       default: "",
     },
 
     audioUrl: {
       type: String,
+      trim: true,
       default: "",
     },
 
-    sticker: {
-      type: String,
-      default: "",
+    audioDuration: {
+      type: Number,
+      min: 1,
+      max: 300,
+      default: null,
     },
 
     author: {
@@ -42,48 +47,45 @@ const commentSchema = new mongoose.Schema(
       ref: "Article",
       required: true,
     },
+
+    status: {
+  type: String,
+  enum: ["approved", "rejected"],
+  default: "approved",
+},
   },
   {
     timestamps: true,
   }
 );
 
+// Make sure each comment has the correct content for its type.
 commentSchema.pre("validate", function () {
-  const hasContent = Boolean(this.content?.trim());
-  const hasImage = Boolean(this.imageUrl);
-  const hasAudio = Boolean(this.audioUrl);
-  const hasSticker = Boolean(this.sticker);
-
-  if (!hasContent && !hasImage && !hasAudio && !hasSticker) {
-    this.invalidate(
-      "content",
-      "A comment must contain text, an image, audio, or a sticker"
-    );
+  if (this.type === "text") {
+    if (!this.content || this.content.trim().length < 2) {
+      this.invalidate("content", "Text comments must contain at least 2 characters");
+    }
   }
 
-  const attachmentCount = [hasImage, hasAudio, hasSticker].filter(Boolean).length;
-
-  if (attachmentCount > 1) {
-    this.invalidate(
-      "type",
-      "Only one attachment type is allowed per comment"
-    );
+  if (this.type === "sticker") {
+    if (!this.stickerUrl) {
+      this.invalidate("stickerUrl", "A sticker URL is required");
+    }
   }
 
-  if (attachmentCount === 1 && hasContent) {
-    this.type = "mixed";
-  } else if (hasImage) {
-    this.type = "image";
-  } else if (hasAudio) {
-    this.type = "audio";
-  } else if (hasSticker) {
-    this.type = "sticker";
-  } else {
-    this.type = "text";
+  if (this.type === "audio") {
+    if (!this.audioUrl) {
+      this.invalidate("audioUrl", "An audio URL is required");
+    }
+
+    if (!this.audioDuration || this.audioDuration < 1) {
+      this.invalidate("audioDuration", "Audio duration must be at least 1 second");
+    }
   }
 });
 
 const Comment = mongoose.model("Comment", commentSchema);
 
 module.exports = Comment;
+
 

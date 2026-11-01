@@ -6,6 +6,7 @@ const {
   createArticle,
   getArticles,
   getArticleBySlug,
+  getMyArticleById,
   updateArticle,
   deleteArticle,
   getAllArticlesForAdmin,
@@ -27,6 +28,7 @@ router.post(
   createArticle
 );
 router.get("/", getArticles);
+router.get("/my-articles/:id", protect, getMyArticleById);
 router.get(
   "/admin/all",
   protect,
