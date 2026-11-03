@@ -48,11 +48,24 @@ const commentSchema = new mongoose.Schema(
       required: true,
     },
 
+    parentComment: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Comment",
+      default: null,
+    },
+
+    likes: [
+  {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "User",
+  },
+],
+
     status: {
-  type: String,
-  enum: ["approved", "rejected"],
-  default: "approved",
-},
+      type: String,
+      enum: ["approved", "rejected"],
+      default: "approved",
+    },
   },
   {
     timestamps: true,

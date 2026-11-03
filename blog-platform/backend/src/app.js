@@ -17,6 +17,7 @@ const {
   errorHandler,
 } = require("./middleware/error.middleware");
 const apiLimiter = require("./middleware/rate-limit.middleware");
+const path = require("path");
 
 const app = express();
 app.use(
@@ -30,6 +31,7 @@ app.use(helmet());
 app.use(express.json({ limit: "100kb" }));;
 app.use(cookieParser());
 app.use("/api", apiLimiter);
+app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
 app.use("/api/v1/health", healthRoutes);
 app.use("/api/v1/about", aboutRoutes);
