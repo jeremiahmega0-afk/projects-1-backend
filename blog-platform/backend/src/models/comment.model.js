@@ -61,11 +61,22 @@ const commentSchema = new mongoose.Schema(
   },
 ],
 
-    status: {
-      type: String,
-      enum: ["approved", "rejected"],
-      default: "approved",
-    },
+   status: {
+  type: String,
+  enum: ["approved", "rejected", "hidden"],
+  default: "approved",
+},
+
+moderatedBy: {
+  type: mongoose.Schema.Types.ObjectId,
+  ref: "User",
+  default: null,
+},
+
+moderatedAt: {
+  type: Date,
+  default: null,
+},
   },
   {
     timestamps: true,

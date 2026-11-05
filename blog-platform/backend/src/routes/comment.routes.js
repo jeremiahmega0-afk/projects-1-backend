@@ -2,6 +2,7 @@
 const express = require("express");
 
 const protect = require("../middleware/auth.middleware");
+const authorize = require("../middleware/role.middleware");
 const validate = require("../middleware/validate.middleware");
 const {
   createCommentSchema,
@@ -13,12 +14,14 @@ const {
   toggleCommentLike,
   editComment,
   deleteComment,
+  getAllComments,
 } = require("../controllers/comment.controller");
 const audioUpload = require("../uploads/audioUpload");
 const Comment = require("../models/comment.model");
 const Article = require("../models/article.model");
 const mongoose = require("mongoose");
-const fs = require("fs");
+const uploadMedia = require("../utils/uploadMedia");
+const cloudinary = require("../config/cloudinary");
 
 const router = express.Router();
 
@@ -56,15 +59,13 @@ router.post(
   protect,
   audioUpload.single("audio"),
   async (req, res) => {
+    let uploadedAudio;
+
     try {
       const { articleId } = req.params;
 
       // Check article ID
       if (!mongoose.Types.ObjectId.isValid(articleId)) {
-        if (req.file) {
-          await fs.promises.unlink(req.file.path);
-        }
-
         return res.status(400).json({
           success: false,
           message: "Invalid article ID",
@@ -87,8 +88,6 @@ router.post(
         duration < 1 ||
         duration > 300
       ) {
-        await fs.promises.unlink(req.file.path);
-
         return res.status(400).json({
           success: false,
           message: "Audio duration must be between 1 and 300 seconds",
@@ -102,21 +101,22 @@ router.post(
       });
 
       if (!article) {
-        await fs.promises.unlink(req.file.path);
-
         return res.status(404).json({
           success: false,
           message: "Published article not found",
         });
       }
 
-      // Generate audio URL
-      const audioUrl = `${req.protocol}://${req.get("host")}/uploads/${req.file.filename}`;
+      uploadedAudio = await uploadMedia(
+        req.file.buffer,
+        "video",
+        "blog-platform/audio-comments"
+      );
 
       // Save audio comment in MongoDB
       const comment = await Comment.create({
         type: "audio",
-        audioUrl,
+        audioUrl: uploadedAudio.url,
         audioDuration: duration,
         author: req.user.id,
         article: articleId,
@@ -131,8 +131,15 @@ router.post(
     } catch (error) {
       console.error("Audio comment error:", error);
 
-      if (req.file) {
-        await fs.promises.unlink(req.file.path).catch(() => {});
+      if (uploadedAudio) {
+        try {
+          await cloudinary.uploader.destroy(
+            uploadedAudio.publicId,
+            { resource_type: "video" }
+          );
+        } catch (cleanupError) {
+          console.error("Failed to remove orphaned audio upload:", cleanupError);
+        }
       }
 
       return res.status(500).json({
@@ -142,4 +149,12 @@ router.post(
     }
   }
 );
+// Admin: Retrieve all comments
+router.get(
+  "/admin/all",
+  protect,
+  authorize("admin"),
+  getAllComments
+);
+
 module.exports = router;

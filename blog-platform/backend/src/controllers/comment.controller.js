@@ -55,15 +55,15 @@ const createComment = async (req, res) => {
 
     // Create the comment or reply
     const comment = await Comment.create({
-  type,
-  content,
-  stickerUrl,
-  audioUrl,
-  audioDuration,
-  author: req.user.id,
-  article: articleId,
-  parentComment: parentComment || null,
-});
+      type,
+      content,
+      stickerUrl,
+      audioUrl,
+      audioDuration,
+      author: req.user.id,
+      article: articleId,
+      parentComment: parentComment || null,
+    });
 
     return res.status(201).json({
       success: true,
@@ -96,16 +96,16 @@ const getArticleComments = async (req, res) => {
     const comments = await Comment.find({
       article: articleId,
       parentComment: null,
+      status: "approved",
     })
       .populate("author", "name")
       .sort({ createdAt: -1 });
-
-
 
     const commentsWithReplies = await Promise.all(
       comments.map(async (comment) => {
         const replies = await Comment.find({
           parentComment: comment._id,
+          status: "approved",
         })
           .populate("author", "name")
           .sort({ createdAt: 1 });
@@ -139,6 +139,7 @@ const getArticleComments = async (req, res) => {
   }
 };
 
+
 const toggleCommentLike = async (req, res) => {
   try {
     const { commentId } = req.params;
@@ -159,6 +160,14 @@ const toggleCommentLike = async (req, res) => {
       return res.status(404).json({
         success: false,
         message: "Comment not found",
+      });
+    }
+
+    // Prevent liking hidden or rejected comments
+    if (comment.status !== "approved") {
+      return res.status(403).json({
+        success: false,
+        message: "You cannot like a hidden or rejected comment",
       });
     }
 
@@ -194,6 +203,7 @@ const toggleCommentLike = async (req, res) => {
     });
   }
 };
+
 const editComment = async (req, res) => {
   try {
     const { commentId } = req.params;
@@ -305,10 +315,101 @@ const deleteComment = async (req, res) => {
   }
 };
 
+const getAllComments = async (req, res) => {
+  try {
+    const { status, type, articleId } = req.query;
+
+    // Pagination settings
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(
+      100,
+      Math.max(1, parseInt(req.query.limit) || 10)
+    );
+
+    const skip = (page - 1) * limit;
+
+    // Build filter
+    const filter = {};
+
+    if (status) {
+      const allowedStatuses = ["approved", "hidden", "rejected"];
+
+      if (!allowedStatuses.includes(status)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid comment status",
+        });
+      }
+
+      filter.status = status;
+    }
+
+    if (type) {
+      const allowedTypes = ["text", "sticker", "audio"];
+
+      if (!allowedTypes.includes(type)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid comment type",
+        });
+      }
+
+      filter.type = type;
+    }
+
+    if (articleId) {
+      if (!mongoose.Types.ObjectId.isValid(articleId)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid article ID",
+        });
+      }
+
+      filter.article = articleId;
+    }
+
+    // Count matching comments
+    const totalComments = await Comment.countDocuments(filter);
+
+    // Get comments for the selected page
+    const comments = await Comment.find(filter)
+      .populate("author", "name email")
+      .populate("article", "title")
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit);
+
+    const totalPages = Math.ceil(totalComments / limit);
+
+    return res.status(200).json({
+      success: true,
+      message: "Comments retrieved successfully",
+      pagination: {
+        totalComments,
+        totalPages,
+        currentPage: page,
+        limit,
+        hasNextPage: page < totalPages,
+        hasPreviousPage: page > 1,
+      },
+      comments,
+    });
+  } catch (error) {
+    console.error("Get all comments error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to retrieve comments",
+    });
+  }
+};
+
+
 module.exports = {
   createComment,
   getArticleComments,
   toggleCommentLike,
   editComment,
   deleteComment,
+  getAllComments,
 };

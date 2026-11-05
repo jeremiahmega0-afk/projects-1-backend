@@ -79,6 +79,89 @@ const createCommentReport = async (req, res) => {
   }
 };
 
+
+const getAllCommentReports = async (req, res) => {
+  try {
+    const reports = await CommentReport.find()
+      .populate("comment")
+      .populate("reportedBy", "name email")
+      .sort({ createdAt: -1 });
+
+    return res.status(200).json({
+      success: true,
+      totalReports: reports.length,
+      reports,
+    });
+  } catch (error) {
+    console.error("Get comment reports error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to retrieve comment reports",
+    });
+  }
+};
+
+
+const updateCommentReportStatus = async (req, res) => {
+  try {
+    const { reportId } = req.params;
+    const { status } = req.body;
+
+    // Check report ID
+    if (!mongoose.Types.ObjectId.isValid(reportId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid report ID",
+      });
+    }
+
+    // Check allowed statuses
+    const allowedStatuses = [
+      "reviewed",
+      "dismissed",
+      "action_taken",
+    ];
+
+    if (!allowedStatuses.includes(status)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid report status",
+      });
+    }
+
+    // Find and update report
+    const report = await CommentReport.findByIdAndUpdate(
+      reportId,
+      { status },
+      { new: true, runValidators: true }
+    );
+
+    if (!report) {
+      return res.status(404).json({
+        success: false,
+        message: "Comment report not found",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Report status updated successfully",
+      report,
+    });
+
+  } catch (error) {
+    console.error("Update report status error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to update report status",
+    });
+  }
+};
+
 module.exports = {
   createCommentReport,
+   getAllCommentReports,
+  updateCommentReportStatus,
 };

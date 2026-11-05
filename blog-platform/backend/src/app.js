@@ -12,6 +12,7 @@ const articleRoutes = require("./routes/article.routes");
 const categoryRoutes = require("./routes/category.routes");
 const commentRoutes = require("./routes/comment.routes");
 const commentReportRoutes = require("./routes/commentReport.routes");
+const commentModerationRoutes = require("./routes/commentModeration.routes");
 
 const {
   notFound,
@@ -43,6 +44,7 @@ app.use("/api/v1/articles", articleRoutes);
 app.use("/api/v1/categories", categoryRoutes);
 app.use("/api/v1/comments", commentRoutes);
 app.use("/api/v1/comment-reports", commentReportRoutes);
+app.use("/api/v1/comment-moderation", commentModerationRoutes);
 
 app.use(notFound);
 app.use(errorHandler);

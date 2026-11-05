@@ -14,6 +14,26 @@ const {
   rejectArticle,
 } = require("../controllers/article.controller");
 const validate = require("../middleware/validate.middleware");
+const imageUpload = require("../uploads/imageUpload");
+const uploadMedia = require("../utils/uploadMedia");
+
+const uploadCoverImage = async (req, res, next) => {
+  if (!req.file) {
+    return next();
+  }
+
+  try {
+    const uploadedImage = await uploadMedia(
+      req.file.buffer,
+      "image",
+      "blog-platform/articles"
+    );
+    req.body.coverImage = uploadedImage.url;
+    next();
+  } catch (error) {
+    next(error);
+  }
+};
 
 const {
   createArticleSchema,
@@ -24,7 +44,9 @@ const router = express.Router();
 router.post(
   "/",
   protect,
+  imageUpload.single("coverImage"),
   validate(createArticleSchema),
+  uploadCoverImage,
   createArticle
 );
 router.get("/", getArticles);
@@ -53,7 +75,9 @@ router.get("/:slug", getArticleBySlug);
 router.patch(
   "/:id",
   protect,
+  imageUpload.single("coverImage"),
   validate(updateArticleSchema),
+  uploadCoverImage,
   updateArticle
 );
 router.delete("/:id", protect, deleteArticle);
