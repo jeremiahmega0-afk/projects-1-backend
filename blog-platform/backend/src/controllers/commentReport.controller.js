@@ -26,6 +26,14 @@ const createCommentReport = async (req, res) => {
       });
     }
 
+    // Prevent reporting hidden or rejected comments
+    if (comment.status !== "approved") {
+      return res.status(403).json({
+        success: false,
+        message: "You cannot report a hidden or rejected comment",
+      });
+    }
+
     // 3. Prevent users from reporting their own comments
     if (comment.author.toString() === req.user.id) {
       return res.status(400).json({
@@ -162,6 +170,6 @@ const updateCommentReportStatus = async (req, res) => {
 
 module.exports = {
   createCommentReport,
-   getAllCommentReports,
+  getAllCommentReports,
   updateCommentReportStatus,
 };

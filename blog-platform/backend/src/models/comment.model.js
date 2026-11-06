@@ -29,6 +29,12 @@ const commentSchema = new mongoose.Schema(
       default: "",
     },
 
+    audioPublicId: {
+      type: String,
+      trim: true,
+      default: "",
+    },
+
     audioDuration: {
       type: Number,
       min: 1,
@@ -55,28 +61,28 @@ const commentSchema = new mongoose.Schema(
     },
 
     likes: [
-  {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: "User",
-  },
-],
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+      },
+    ],
 
-   status: {
-  type: String,
-  enum: ["approved", "rejected", "hidden"],
-  default: "approved",
-},
+    status: {
+      type: String,
+      enum: ["approved", "rejected", "hidden"],
+      default: "approved",
+    },
 
-moderatedBy: {
-  type: mongoose.Schema.Types.ObjectId,
-  ref: "User",
-  default: null,
-},
+    moderatedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
 
-moderatedAt: {
-  type: Date,
-  default: null,
-},
+    moderatedAt: {
+      type: Date,
+      default: null,
+    },
   },
   {
     timestamps: true,

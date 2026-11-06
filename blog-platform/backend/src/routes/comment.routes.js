@@ -1,5 +1,6 @@
 
 const express = require("express");
+const multer = require("multer");
 
 const protect = require("../middleware/auth.middleware");
 const authorize = require("../middleware/role.middleware");
@@ -17,6 +18,7 @@ const {
   getAllComments,
 } = require("../controllers/comment.controller");
 const audioUpload = require("../uploads/audioUpload");
+const validateAudioFile = audioUpload.validateAudioFile;
 const Comment = require("../models/comment.model");
 const Article = require("../models/article.model");
 const mongoose = require("mongoose");
@@ -54,10 +56,35 @@ router.delete(
   protect,
   deleteComment
 );
+const handleAudioUpload = (req, res, next) => {
+  audioUpload.single("audio")(req, res, (error) => {
+    if (error) {
+      if (error instanceof multer.MulterError) {
+        const message =
+          error.code === "LIMIT_FILE_SIZE"
+            ? "Audio file must not exceed 10MB"
+            : "Audio upload failed";
+
+        return res.status(400).json({
+          success: false,
+          message,
+        });
+      }
+
+      return res.status(400).json({
+        success: false,
+        message: error.message,
+      });
+    }
+
+    next();
+  });
+};
 router.post(
   "/:articleId/audio",
   protect,
-  audioUpload.single("audio"),
+  handleAudioUpload,
+  validateAudioFile,
   async (req, res) => {
     let uploadedAudio;
 
@@ -113,10 +140,10 @@ router.post(
         "blog-platform/audio-comments"
       );
 
-      // Save audio comment in MongoDB
       const comment = await Comment.create({
         type: "audio",
         audioUrl: uploadedAudio.url,
+        audioPublicId: uploadedAudio.publicId,
         audioDuration: duration,
         author: req.user.id,
         article: articleId,

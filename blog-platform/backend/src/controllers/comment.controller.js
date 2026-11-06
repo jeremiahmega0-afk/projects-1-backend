@@ -2,6 +2,7 @@
 const mongoose = require("mongoose");
 const Comment = require("../models/comment.model");
 const Article = require("../models/article.model");
+const cloudinary = require("../config/cloudinary");
 const { updateCommentSchema } = require("../validations/comment.validation");
 
 const createComment = async (req, res) => {
@@ -40,6 +41,13 @@ const createComment = async (req, res) => {
 
     // If this is a reply, check that the parent comment exists
     if (parentComment) {
+      if (!mongoose.Types.ObjectId.isValid(parentComment)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid parent comment ID",
+        });
+      }
+
       const parent = await Comment.findOne({
         _id: parentComment,
         article: articleId,
@@ -49,6 +57,14 @@ const createComment = async (req, res) => {
         return res.status(404).json({
           success: false,
           message: "Parent comment not found for this article",
+        });
+      }
+
+      // Prevent replying to hidden or rejected comments
+      if (parent.status !== "approved") {
+        return res.status(403).json({
+          success: false,
+          message: "You cannot reply to a hidden or rejected comment",
         });
       }
     }
@@ -79,6 +95,7 @@ const createComment = async (req, res) => {
     });
   }
 };
+
 
 const getArticleComments = async (req, res) => {
   try {
@@ -140,12 +157,12 @@ const getArticleComments = async (req, res) => {
 };
 
 
+
 const toggleCommentLike = async (req, res) => {
   try {
     const { commentId } = req.params;
-    const userId = req.user.id;
+    const userId = new mongoose.Types.ObjectId(req.user.id);
 
-    // Check whether the comment ID is valid
     if (!mongoose.Types.ObjectId.isValid(commentId)) {
       return res.status(400).json({
         success: false,
@@ -153,49 +170,61 @@ const toggleCommentLike = async (req, res) => {
       });
     }
 
-    // Find the comment
-    const comment = await Comment.findById(commentId);
+   const updatedComment = await Comment.findOneAndUpdate(
+  {
+    _id: commentId,
+    status: "approved",
+  },
+  [
+    {
+      $set: {
+        likes: {
+          $cond: [
+            { $in: [userId, "$likes"] },
+            {
+              $filter: {
+                input: "$likes",
+                as: "like",
+                cond: { $ne: ["$$like", userId] },
+              },
+            },
+            { $concatArrays: ["$likes", [userId]] },
+          ],
+        },
+      },
+    },
+  ],
+  {
+    new: true,
+    updatePipeline: true,
+  }
+);
 
-    if (!comment) {
-      return res.status(404).json({
+    if (!updatedComment) {
+      const exists = await Comment.exists({ _id: commentId });
+
+      return res.status(exists ? 403 : 404).json({
         success: false,
-        message: "Comment not found",
+        message: exists
+          ? "You cannot like a hidden or rejected comment"
+          : "Comment not found",
       });
     }
 
-    // Prevent liking hidden or rejected comments
-    if (comment.status !== "approved") {
-      return res.status(403).json({
-        success: false,
-        message: "You cannot like a hidden or rejected comment",
-      });
-    }
-
-    // Check whether the user has already liked the comment
-    const alreadyLiked = comment.likes.some(
+    const liked = updatedComment.likes.some(
       (id) => id.toString() === userId.toString()
     );
 
-    if (alreadyLiked) {
-      // Remove the user's like
-      comment.likes.pull(userId);
-    } else {
-      // Add the user's like
-      comment.likes.addToSet(userId);
-    }
-
-    await comment.save();
-
     return res.status(200).json({
       success: true,
-      message: alreadyLiked
-        ? "Comment unliked successfully"
-        : "Comment liked successfully",
-      totalLikes: comment.likes.length,
-      liked: !alreadyLiked,
+      message: liked
+        ? "Comment liked successfully"
+        : "Comment unliked successfully",
+      totalLikes: updatedComment.likes.length,
+      liked,
     });
   } catch (error) {
-    console.error(error);
+    console.error("Toggle comment like error:", error);
 
     return res.status(500).json({
       success: false,
@@ -203,6 +232,7 @@ const toggleCommentLike = async (req, res) => {
     });
   }
 };
+
 
 const editComment = async (req, res) => {
   try {
@@ -225,6 +255,14 @@ const editComment = async (req, res) => {
       return res.status(404).json({
         success: false,
         message: "Comment not found",
+      });
+    }
+
+    // Prevent editing hidden or rejected comments
+    if (comment.status !== "approved") {
+      return res.status(403).json({
+        success: false,
+        message: "You cannot edit a hidden or rejected comment",
       });
     }
 
@@ -262,12 +300,55 @@ const editComment = async (req, res) => {
     });
   }
 };
+
+
+const deleteCommentAndReplies = async (commentId, session) => {
+  const commentIds = [commentId];
+  let index = 0;
+
+  // Step 1: Find all replies, including nested replies
+  while (index < commentIds.length) {
+    const replies = await Comment.find({
+      parentComment: commentIds[index],
+    })
+      .select("_id")
+      .session(session);
+
+    for (const reply of replies) {
+      commentIds.push(reply._id);
+    }
+
+    index++;
+  }
+
+  // Step 2: Collect Cloudinary audio IDs before deleting comments
+  const comments = await Comment.find({
+    _id: { $in: commentIds },
+  })
+    .select("_id audioPublicId")
+    .session(session);
+
+  const audioPublicIds = comments
+    .map((comment) => comment.audioPublicId)
+    .filter((publicId) => publicId);
+
+  // Step 3: Delete all comments from MongoDB
+  await Comment.deleteMany(
+    { _id: { $in: commentIds } },
+    { session }
+  );
+
+  // Step 4: Return audio IDs for later Cloudinary cleanup
+  return audioPublicIds;
+};
+
+
+
 const deleteComment = async (req, res) => {
   try {
     const { commentId } = req.params;
     const userId = req.user.id;
 
-    // Check whether the comment ID is valid
     if (!mongoose.Types.ObjectId.isValid(commentId)) {
       return res.status(400).json({
         success: false,
@@ -275,7 +356,6 @@ const deleteComment = async (req, res) => {
       });
     }
 
-    // Find the comment
     const comment = await Comment.findById(commentId);
 
     if (!comment) {
@@ -285,32 +365,60 @@ const deleteComment = async (req, res) => {
       });
     }
 
-    // Check whether the logged-in user owns the comment
     if (comment.author.toString() !== userId.toString()) {
       return res.status(403).json({
         success: false,
-        message: "You can only delete your own comments",
+        message: "You are not allowed to delete this comment",
       });
     }
 
-    // Delete all replies belonging to this comment
-    await Comment.deleteMany({
-      parentComment: comment._id,
-    });
+    const session = await mongoose.startSession();
+    let audioPublicIds = [];
 
-    // Delete the actual comment
-    await Comment.findByIdAndDelete(commentId);
+    try {
+      await session.withTransaction(async () => {
+        audioPublicIds = await deleteCommentAndReplies(
+          comment._id,
+          session
+        );
+      });
+    } finally {
+      await session.endSession();
+    }
+
+    // Delete audio files from Cloudinary after MongoDB succeeds
+    const cleanupResults = await Promise.allSettled(
+      audioPublicIds.map((publicId) =>
+        cloudinary.uploader.destroy(publicId, {
+          resource_type: "video",
+        })
+      )
+    );
+
+    const failedCleanups = cleanupResults.filter(
+      (result) => result.status === "rejected"
+    );
+
+    if (failedCleanups.length > 0) {
+      console.error(
+        "Some Cloudinary audio files could not be deleted:",
+        failedCleanups
+      );
+    }
 
     return res.status(200).json({
       success: true,
       message: "Comment and its replies deleted successfully",
+      audioFilesDeleted:
+        audioPublicIds.length - failedCleanups.length,
+      audioFilesFailed: failedCleanups.length,
     });
   } catch (error) {
-    console.error(error);
+    console.error("Delete comment error:", error);
 
     return res.status(500).json({
       success: false,
-      message: "Something went wrong",
+      message: "Failed to delete comment",
     });
   }
 };
