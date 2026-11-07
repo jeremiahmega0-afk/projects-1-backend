@@ -51,6 +51,36 @@ const articleSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+
+    views: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+
+    likes: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+      },
+    ],
+
+    reactions: [
+      {
+        user: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "User",
+          required: true,
+        },
+
+        type: {
+          type: String,
+          enum: ["love", "laugh", "wow", "sad"],
+          required: true,
+        },
+      },
+    ],
+
   },
   {
     timestamps: true,

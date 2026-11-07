@@ -12,10 +12,15 @@ const {
   getAllArticlesForAdmin,
   approveArticle,
   rejectArticle,
+  toggleArticleLike,
+  toggleArticleReaction,
 } = require("../controllers/article.controller");
 const validate = require("../middleware/validate.middleware");
 const imageUpload = require("../uploads/imageUpload");
 const uploadMedia = require("../utils/uploadMedia");
+const {
+  articleReactionSchema,
+} = require("../validations/articleReaction.validation");
 
 const uploadCoverImage = async (req, res, next) => {
   if (!req.file) {
@@ -81,5 +86,14 @@ router.patch(
   updateArticle
 );
 router.delete("/:id", protect, deleteArticle);
+
+router.post("/:articleId/like", protect, toggleArticleLike);
+
+router.post(
+  "/:articleId/reaction",
+  protect,
+  validate(articleReactionSchema),
+  toggleArticleReaction
+);
 
 module.exports = router;

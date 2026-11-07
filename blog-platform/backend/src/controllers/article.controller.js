@@ -1,6 +1,7 @@
 const mongoose = require("mongoose");
 const Article = require("../models/article.model");
 const Category = require("../models/category.model");
+const ArticleView = require("../models/articleView.model");
 const slugify = require("slugify");
 
 const {
@@ -138,6 +139,7 @@ const getArticles = async (req, res) => {
     });
   }
 };
+
 const getArticleBySlug = async (req, res) => {
   try {
     const { slug } = req.params;
@@ -145,7 +147,7 @@ const getArticleBySlug = async (req, res) => {
     const article = await Article.findOne({
       slug,
       status: "published",
-    }).populate("author", "name email avatar");
+    });
 
     if (!article) {
       return res.status(404).json({
@@ -154,19 +156,57 @@ const getArticleBySlug = async (req, res) => {
       });
     }
 
-    res.status(200).json({
-      success: true,
-      article,
-    });
-  } catch (error) {
-    console.error(error);
+    let viewCounted = false;
 
-    res.status(500).json({
+    // Count every anonymous visit.
+    if (!req.user) {
+      await Article.updateOne(
+        { _id: article._id, status: "published" },
+        { $inc: { views: 1 } }
+      );
+
+      viewCounted = true;
+    } else {
+      // Count a logged-in user's first visit only.
+      try {
+        await ArticleView.create({
+          article: article._id,
+          user: req.user.id,
+        });
+
+        await Article.updateOne(
+          { _id: article._id, status: "published" },
+          { $inc: { views: 1 } }
+        );
+
+        viewCounted = true;
+      } catch (error) {
+        if (error.code !== 11000) {
+          throw error;
+        }
+        // Duplicate record means this user already viewed the article.
+      }
+    }
+
+    const updatedArticle = await Article.findById(article._id)
+      .populate("author", "name email avatar");
+
+    return res.status(200).json({
+      success: true,
+      viewCounted,
+      article: updatedArticle,
+    });
+
+  } catch (error) {
+    console.error("Get article by slug error:", error);
+
+    return res.status(500).json({
       success: false,
       message: "Something went wrong",
     });
   }
 };
+
 
 const getMyArticleById = async (req, res) => {
   try {
@@ -543,6 +583,243 @@ const rejectArticle = async (req, res) => {
   }
 };
 
+
+const toggleArticleLike = async (req, res) => {
+  try {
+    const { articleId } = req.params;
+    const userId = new mongoose.Types.ObjectId(req.user.id);
+
+    if (!mongoose.Types.ObjectId.isValid(articleId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid article ID",
+      });
+    }
+
+    const article = await Article.findOne({
+      _id: articleId,
+      status: "published",
+    });
+
+    if (!article) {
+      return res.status(404).json({
+        success: false,
+        message: "Published article not found",
+      });
+    }
+
+    const updatedArticle = await Article.findOneAndUpdate(
+      {
+        _id: articleId,
+        status: "published",
+      },
+     
+[
+  {
+    $set: {
+      likes: {
+        $let: {
+          vars: {
+            currentLikes: { $ifNull: ["$likes", []] }
+          },
+          in: {
+            $cond: [
+              { $in: [userId, "$$currentLikes"] },
+              {
+                $filter: {
+                  input: "$$currentLikes",
+                  as: "like",
+                  cond: { $ne: ["$$like", userId] }
+                }
+              },
+              {
+                $concatArrays: ["$$currentLikes", [userId]]
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+],
+      { returnDocument: "after", updatePipeline: true }
+    );
+
+    if (!updatedArticle) {
+      return res.status(404).json({
+        success: false,
+        message: "Published article not found",
+      });
+    }
+
+    const liked = updatedArticle.likes.some(
+      (id) => id.toString() === userId.toString()
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: liked
+        ? "Article liked successfully"
+        : "Article unliked successfully",
+      totalLikes: updatedArticle.likes.length,
+      liked,
+    });
+  } catch (error) {
+    console.error("Toggle article like error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong",
+    });
+  }
+};
+
+
+const toggleArticleReaction = async (req, res) => {
+  try {
+    const { articleId } = req.params;
+    const { type } = req.body;
+    const userId = new mongoose.Types.ObjectId(req.user.id);
+
+    if (!mongoose.Types.ObjectId.isValid(articleId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid article ID",
+      });
+    }
+
+    const allowedReactions = ["love", "laugh", "wow", "sad"];
+
+    if (!allowedReactions.includes(type)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid reaction type",
+      });
+    }
+
+    const updatedArticle = await Article.findOneAndUpdate(
+      {
+        _id: articleId,
+        status: "published",
+      },
+      [
+        {
+          $set: {
+            reactions: {
+              $let: {
+                vars: {
+                  currentReactions: {
+                    $ifNull: ["$reactions", []],
+                  },
+                  existingReaction: {
+                    $arrayElemAt: [
+                      {
+                        $filter: {
+                          input: {
+                            $ifNull: ["$reactions", []],
+                          },
+                          as: "reaction",
+                          cond: {
+                            $eq: ["$$reaction.user", userId],
+                          },
+                        },
+                      },
+                      0,
+                    ],
+                  },
+                },
+                in: {
+                  $cond: [
+                    {
+                      $eq: ["$$existingReaction.type", type],
+                    },
+                    {
+                      $filter: {
+                        input: "$$currentReactions",
+                        as: "reaction",
+                        cond: {
+                          $ne: ["$$reaction.user", userId],
+                        },
+                      },
+                    },
+                    {
+                      $concatArrays: [
+                        {
+                          $filter: {
+                            input: "$$currentReactions",
+                            as: "reaction",
+                            cond: {
+                              $ne: ["$$reaction.user", userId],
+                            },
+                          },
+                        },
+                        [
+                          {
+                            user: userId,
+                            type: type,
+                          },
+                        ],
+                      ],
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      ],
+      {
+        returnDocument: "after",
+        updatePipeline: true,
+      }
+    );
+
+    if (!updatedArticle) {
+      return res.status(404).json({
+        success: false,
+        message: "Published article not found",
+      });
+    }
+
+    const userReaction = updatedArticle.reactions.find(
+      (reaction) =>
+        reaction.user.toString() === userId.toString()
+    );
+
+    const reactionCounts = {
+      love: updatedArticle.reactions.filter(
+        (reaction) => reaction.type === "love"
+      ).length,
+      laugh: updatedArticle.reactions.filter(
+        (reaction) => reaction.type === "laugh"
+      ).length,
+      wow: updatedArticle.reactions.filter(
+        (reaction) => reaction.type === "wow"
+      ).length,
+      sad: updatedArticle.reactions.filter(
+        (reaction) => reaction.type === "sad"
+      ).length,
+    };
+
+    return res.status(200).json({
+      success: true,
+      message: userReaction
+        ? "Reaction saved successfully"
+        : "Reaction removed successfully",
+      myReaction: userReaction ? userReaction.type : null,
+      reactionCounts,
+    });
+  } catch (error) {
+    console.error("Toggle article reaction error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong",
+    });
+  }
+};
+
+
 module.exports = {
   createArticle,
   getArticles,
@@ -553,4 +830,6 @@ module.exports = {
   getAllArticlesForAdmin,
   approveArticle,
   rejectArticle,
+  toggleArticleLike,
+  toggleArticleReaction,
 };
