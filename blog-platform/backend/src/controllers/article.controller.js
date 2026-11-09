@@ -159,32 +159,60 @@ const getArticleBySlug = async (req, res) => {
     let viewCounted = false;
 
     // Count every anonymous visit.
+    // Count and save every anonymous visit.
     if (!req.user) {
-      await Article.updateOne(
-        { _id: article._id, status: "published" },
-        { $inc: { views: 1 } }
-      );
+      const session = await Article.db.startSession();
 
-      viewCounted = true;
-    } else {
-      // Count a logged-in user's first visit only.
       try {
-        await ArticleView.create({
-          article: article._id,
-          user: req.user.id,
+        await session.withTransaction(async () => {
+          // Save the anonymous visitor's view.
+          const anonymousView = new ArticleView({
+            article: article._id,
+          });
+
+          await anonymousView.save({ session });
+
+          // Increase the article's view count.
+          await Article.updateOne(
+            { _id: article._id, status: "published" },
+            { $inc: { views: 1 } },
+            { session }
+          );
         });
 
-        await Article.updateOne(
-          { _id: article._id, status: "published" },
-          { $inc: { views: 1 } }
-        );
+        viewCounted = true;
+      } finally {
+        await session.endSession();
+      }
+    } else {
+      const session = await Article.db.startSession();
+
+      try {
+        await session.withTransaction(async () => {
+          const articleView = new ArticleView({
+            article: article._id,
+            user: req.user.id,
+          });
+
+          // Save the user's view record.
+          await articleView.save({ session });
+
+          // Increase the article's view count.
+          await Article.updateOne(
+            { _id: article._id, status: "published" },
+            { $inc: { views: 1 } },
+            { session }
+          );
+        });
 
         viewCounted = true;
       } catch (error) {
         if (error.code !== 11000) {
           throw error;
         }
-        // Duplicate record means this user already viewed the article.
+        // The user has already viewed this article.
+      } finally {
+        await session.endSession();
       }
     }
 
@@ -613,35 +641,35 @@ const toggleArticleLike = async (req, res) => {
         _id: articleId,
         status: "published",
       },
-     
-[
-  {
-    $set: {
-      likes: {
-        $let: {
-          vars: {
-            currentLikes: { $ifNull: ["$likes", []] }
-          },
-          in: {
-            $cond: [
-              { $in: [userId, "$$currentLikes"] },
-              {
-                $filter: {
-                  input: "$$currentLikes",
-                  as: "like",
-                  cond: { $ne: ["$$like", userId] }
+
+      [
+        {
+          $set: {
+            likes: {
+              $let: {
+                vars: {
+                  currentLikes: { $ifNull: ["$likes", []] }
+                },
+                in: {
+                  $cond: [
+                    { $in: [userId, "$$currentLikes"] },
+                    {
+                      $filter: {
+                        input: "$$currentLikes",
+                        as: "like",
+                        cond: { $ne: ["$$like", userId] }
+                      }
+                    },
+                    {
+                      $concatArrays: ["$$currentLikes", [userId]]
+                    }
+                  ]
                 }
-              },
-              {
-                $concatArrays: ["$$currentLikes", [userId]]
               }
-            ]
+            }
           }
         }
-      }
-    }
-  }
-],
+      ],
       { returnDocument: "after", updatePipeline: true }
     );
 
@@ -819,6 +847,283 @@ const toggleArticleReaction = async (req, res) => {
   }
 };
 
+const getArticleStatistics = async (req, res) => {
+  try {
+    // Count all published articles.
+    const totalPublishedArticles = await Article.countDocuments({
+      status: "published",
+    });
+
+    // Calculate total views across published articles.
+    const viewsResult = await Article.aggregate([
+      {
+        $match: {
+          status: "published",
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          totalViews: {
+            $sum: {
+              $ifNull: ["$views", 0],
+            },
+          },
+        },
+      },
+    ]);
+
+    const totalViews = viewsResult.length > 0
+      ? viewsResult[0].totalViews
+      : 0;
+
+    // Find the five most-viewed published articles.
+    const mostViewedArticles = await Article.find({
+      status: "published",
+    })
+      .select("title slug views publishedAt")
+      .sort({ views: -1, createdAt: -1 })
+      .limit(5);
+
+    return res.status(200).json({
+      success: true,
+      statistics: {
+        totalPublishedArticles,
+        totalViews,
+        mostViewedArticles,
+      },
+    });
+  } catch (error) {
+    console.error("Article statistics error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong",
+    });
+  }
+};
+
+const getSingleArticleStatistics = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid article ID",
+      });
+    }
+
+    // Find the article.
+    const article = await Article.findById(id)
+      .select("title slug status views likes reactions");
+
+    // Check whether the article exists.
+    if (!article) {
+      return res.status(404).json({
+        success: false,
+        message: "Article not found",
+      });
+    }
+
+    // Count each reaction type.
+    const reactionCounts = {
+      love: 0,
+      laugh: 0,
+      wow: 0,
+      sad: 0,
+    };
+
+    article.reactions.forEach((reaction) => {
+      reactionCounts[reaction.type]++;
+    });
+
+    return res.status(200).json({
+      success: true,
+      statistics: {
+        title: article.title,
+        slug: article.slug,
+        status: article.status,
+        views: article.views || 0,
+        totalLikes: article.likes.length,
+        totalReactions: article.reactions.length,
+        reactionCounts,
+      },
+    });
+  } catch (error) {
+    console.error("Single article statistics error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong",
+    });
+  }
+};
+
+
+const getDailyArticleViews = async (req, res) => {
+  try {
+    const dailyViews = await ArticleView.aggregate([
+      {
+        $group: {
+          _id: {
+            $dateToString: {
+              format: "%Y-%m-%d",
+              date: "$createdAt",
+              timezone: "Africa/Lagos",
+            },
+          },
+          views: { $sum: 1 },
+        },
+      },
+      {
+        $sort: {
+          _id: 1,
+        },
+      },
+      {
+        $project: {
+          _id: 0,
+          date: "$_id",
+          views: 1,
+        },
+      },
+    ]);
+
+    return res.status(200).json({
+      success: true,
+      dailyViews,
+    });
+  } catch (error) {
+    console.error("Daily article views error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong",
+    });
+  }
+};
+
+
+const getSingleArticleDailyViews = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid article ID",
+      });
+    }
+
+    // Check whether the article exists.
+    const article = await Article.findById(id).select("title");
+
+    if (!article) {
+      return res.status(404).json({
+        success: false,
+        message: "Article not found",
+      });
+    }
+
+    // Count views for this article, grouped by date.
+    const dailyViews = await ArticleView.aggregate([
+      {
+        $match: {
+          article: article._id,
+        },
+      },
+      {
+        $group: {
+          _id: {
+            $dateToString: {
+              format: "%Y-%m-%d",
+              date: "$createdAt",
+              timezone: "Africa/Lagos",
+            },
+          },
+          views: { $sum: 1 },
+        },
+      },
+      {
+        $sort: {
+          _id: 1,
+        },
+      },
+      {
+        $project: {
+          _id: 0,
+          date: "$_id",
+          views: 1,
+        },
+      },
+    ]);
+
+    return res.status(200).json({
+      success: true,
+      article: article.title,
+      dailyViews,
+    });
+  } catch (error) {
+    console.error("Single article daily views error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong",
+    });
+  }
+};
+
+
+const getMostViewedArticles = async (req, res) => {
+  try {
+    const mostViewedArticles = await Article.find({
+      status: "published",
+    })
+      .select("title slug coverImage views publishedAt")
+      .sort({ views: -1, createdAt: -1 })
+      .limit(10);
+
+    return res.status(200).json({
+      success: true,
+      total: mostViewedArticles.length,
+      articles: mostViewedArticles,
+    });
+  } catch (error) {
+    console.error("Most viewed articles error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong",
+    });
+  }
+};
+
+
+const getLeastViewedArticles = async (req, res) => {
+  try {
+    const leastViewedArticles = await Article.find({
+      status: "published",
+    })
+      .select("title slug coverImage views publishedAt")
+      .sort({ views: 1, createdAt: -1 })
+      .limit(10);
+
+    return res.status(200).json({
+      success: true,
+      total: leastViewedArticles.length,
+      articles: leastViewedArticles,
+    });
+  } catch (error) {
+    console.error("Least viewed articles error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong",
+    });
+  }
+};
+
 
 module.exports = {
   createArticle,
@@ -832,4 +1137,10 @@ module.exports = {
   rejectArticle,
   toggleArticleLike,
   toggleArticleReaction,
+  getArticleStatistics,
+  getSingleArticleStatistics,
+  getDailyArticleViews,
+  getSingleArticleDailyViews,
+  getMostViewedArticles,
+  getLeastViewedArticles,
 };

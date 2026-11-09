@@ -1,4 +1,3 @@
-
 const mongoose = require("mongoose");
 
 const articleViewSchema = new mongoose.Schema(
@@ -12,7 +11,7 @@ const articleViewSchema = new mongoose.Schema(
     user: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
-      required: true,
+      default: null,
     },
   },
   {
@@ -20,10 +19,16 @@ const articleViewSchema = new mongoose.Schema(
   }
 );
 
-// A user can view an article only once for counting purposes.
+// Prevent duplicate views from the same logged-in user.
 articleViewSchema.index(
   { article: 1, user: 1 },
-  { unique: true }
+  {
+    unique: true,
+    partialFilterExpression: {
+      user: { $type: "objectId" },
+    },
+    name: "article_1_user_1",
+  }
 );
 
 const ArticleView = mongoose.model("ArticleView", articleViewSchema);

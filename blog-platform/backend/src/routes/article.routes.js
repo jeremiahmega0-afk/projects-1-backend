@@ -14,6 +14,12 @@ const {
   rejectArticle,
   toggleArticleLike,
   toggleArticleReaction,
+  getArticleStatistics,
+  getSingleArticleStatistics,
+  getDailyArticleViews,
+  getSingleArticleDailyViews,
+  getMostViewedArticles,
+  getLeastViewedArticles,
 } = require("../controllers/article.controller");
 const validate = require("../middleware/validate.middleware");
 const imageUpload = require("../uploads/imageUpload");
@@ -21,6 +27,7 @@ const uploadMedia = require("../utils/uploadMedia");
 const {
   articleReactionSchema,
 } = require("../validations/articleReaction.validation");
+const optionalProtect = require("../middleware/optionalAuth.middleware");
 
 const uploadCoverImage = async (req, res, next) => {
   if (!req.file) {
@@ -76,7 +83,56 @@ router.patch(
   rejectArticle
 );
 
-router.get("/:slug", getArticleBySlug);
+router.get(
+  "/admin/statistics",
+  protect,
+  authorize("admin"),
+  getArticleStatistics
+);
+
+router.get(
+  "/admin/statistics/daily-views",
+  protect,
+  authorize("admin"),
+  getDailyArticleViews
+);
+
+router.get(
+  "/admin/statistics/most-viewed",
+  protect,
+  authorize("admin"),
+  getMostViewedArticles
+);
+
+router.get(
+  "/admin/statistics/least-viewed",
+  protect,
+  authorize("admin"),
+  getLeastViewedArticles
+);
+
+router.get(
+  "/admin/statistics/views",
+  protect,
+  authorize("admin"),
+  getArticleStatistics
+);
+
+router.get(
+  "/admin/statistics/:id",
+  protect,
+  authorize("admin"),
+  getSingleArticleStatistics
+);
+
+router.get(
+  "/admin/statistics/:id/daily-views",
+  protect,
+  authorize("admin"),
+  getSingleArticleDailyViews
+);
+
+router.get("/:slug", optionalProtect, getArticleBySlug);
 router.patch(
   "/:id",
   protect,
@@ -85,6 +141,9 @@ router.patch(
   uploadCoverImage,
   updateArticle
 );
+
+
+
 router.delete("/:id", protect, deleteArticle);
 
 router.post("/:articleId/like", protect, toggleArticleLike);
