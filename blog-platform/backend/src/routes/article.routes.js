@@ -20,6 +20,8 @@ const {
   getSingleArticleDailyViews,
   getMostViewedArticles,
   getLeastViewedArticles,
+  getViewsByDateRange,
+  getRelatedArticles,
 } = require("../controllers/article.controller");
 const validate = require("../middleware/validate.middleware");
 const imageUpload = require("../uploads/imageUpload");
@@ -112,10 +114,17 @@ router.get(
 );
 
 router.get(
-  "/admin/statistics/views",
+  "/admin/statistics/view",
   protect,
   authorize("admin"),
   getArticleStatistics
+);
+
+router.get(
+  "/admin/statistics/views",
+  protect,
+  authorize("admin"),
+  getViewsByDateRange
 );
 
 router.get(
@@ -131,6 +140,13 @@ router.get(
   authorize("admin"),
   getSingleArticleDailyViews
 );
+
+
+router.get(
+  "/:slug/related",
+  getRelatedArticles
+);
+
 
 router.get("/:slug", optionalProtect, getArticleBySlug);
 router.patch(

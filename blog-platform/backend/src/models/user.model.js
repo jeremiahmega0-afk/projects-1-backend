@@ -8,6 +8,17 @@ const userSchema = new mongoose.Schema(
       trim: true,
     },
 
+    username: {
+      type: String,
+      unique: true,
+      sparse: true,
+      trim: true,
+      lowercase: true,
+      minlength: 3,
+      maxlength: 20,
+      match: /^[a-z0-9_]+$/,
+    },
+
     email: {
       type: String,
       required: true,
@@ -22,6 +33,11 @@ const userSchema = new mongoose.Schema(
     },
 
     avatar: {
+      type: String,
+      default: "",
+    },
+
+    avatarPublicId: {
       type: String,
       default: "",
     },
@@ -41,6 +57,17 @@ const userSchema = new mongoose.Schema(
     isVerified: {
       type: Boolean,
       default: false,
+    },
+    // Number of consecutive failed login attempts
+    failedLoginAttempts: {
+      type: Number,
+      default: 0,
+    },
+
+    // Time when the account lock expires
+    lockUntil: {
+      type: Date,
+      default: null,
     },
   },
   {

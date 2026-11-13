@@ -236,6 +236,60 @@ const getArticleBySlug = async (req, res) => {
 };
 
 
+const getRelatedArticles = async (req, res) => {
+  try {
+    const { slug } = req.params;
+
+    // Find the article the visitor is currently reading.
+    const article = await Article.findOne({
+      slug,
+      status: "published",
+    });
+
+    if (!article) {
+      return res.status(404).json({
+        success: false,
+        message: "Article not found",
+      });
+    }
+
+    // If the article has no category, return an empty list.
+    if (!article.category) {
+      return res.status(200).json({
+        success: true,
+        total: 0,
+        relatedArticles: [],
+      });
+    }
+
+    // Find other published articles in the same category.
+    const relatedArticles = await Article.find({
+      category: article.category,
+      status: "published",
+      _id: { $ne: article._id },
+    })
+      .select("title slug coverImage publishedAt views")
+      .populate("author", "name avatar")
+      .limit(5)
+      .sort({ publishedAt: -1 });
+
+    return res.status(200).json({
+      success: true,
+      total: relatedArticles.length,
+      relatedArticles,
+    });
+
+  } catch (error) {
+    console.error("Get related articles error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong",
+    });
+  }
+};
+
+
 const getMyArticleById = async (req, res) => {
   try {
     const { id } = req.params;
@@ -1125,6 +1179,59 @@ const getLeastViewedArticles = async (req, res) => {
 };
 
 
+const getViewsByDateRange = async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+
+    // Check that both dates were provided.
+    if (!startDate || !endDate) {
+      return res.status(400).json({
+        success: false,
+        message: "Start date and end date are required",
+      });
+    }
+
+    // Convert the dates into JavaScript Date objects.
+   const start = new Date(`${startDate}T00:00:00.000+01:00`);
+const end = new Date(`${endDate}T23:59:59.999+01:00`);
+
+    // Check that the dates are valid.
+    if (
+      Number.isNaN(start.getTime()) ||
+      Number.isNaN(end.getTime()) ||
+      startDate > endDate
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid date range",
+      });
+    }
+
+    // Count views within the selected date range.
+    const totalViews = await ArticleView.countDocuments({
+      createdAt: {
+        $gte: start,
+        $lte: end,
+      },
+    });
+
+    return res.status(200).json({
+      success: true,
+      startDate,
+      endDate,
+      totalViews,
+    });
+  } catch (error) {
+    console.error("Date range views error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong",
+    });
+  }
+};
+
+
 module.exports = {
   createArticle,
   getArticles,
@@ -1143,4 +1250,6 @@ module.exports = {
   getSingleArticleDailyViews,
   getMostViewedArticles,
   getLeastViewedArticles,
+  getViewsByDateRange,
+  getRelatedArticles,
 };

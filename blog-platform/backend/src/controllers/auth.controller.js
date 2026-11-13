@@ -82,10 +82,10 @@ const register = async (req, res) => {
     });
   }
 };
+
 const login = async (req, res) => {
   try {
-    const { email, password } = req.body;
-
+    // 1. Validate the login information
     const validation = loginSchema.safeParse(req.body);
 
     if (!validation.success) {
@@ -95,7 +95,10 @@ const login = async (req, res) => {
       });
     }
 
-    // Find user
+    const email = validation.data.email.trim().toLowerCase();
+    const password = validation.data.password;
+
+    // 2. Find the user
     const user = await User.findOne({ email });
 
     if (!user) {
@@ -105,33 +108,87 @@ const login = async (req, res) => {
       });
     }
 
-    // Compare password
+    // 3. Check whether the account is locked
+    const now = new Date();
+
+    if (user.lockUntil && user.lockUntil > now) {
+      const remainingMinutes = Math.ceil(
+        (user.lockUntil - now) / (60 * 1000)
+      );
+
+      return res.status(423).json({
+        success: false,
+        message: `Account temporarily locked. Try again in ${remainingMinutes} minute(s).`,
+      });
+    }
+
+    // 4. Reset expired lockout
+    if (user.lockUntil && user.lockUntil <= now) {
+      user.failedLoginAttempts = 0;
+      user.lockUntil = null;
+    }
+
+    // 5. Compare the password
     const isPasswordCorrect = await bcrypt.compare(
       password,
       user.password
     );
 
+    // 6. Handle incorrect password
     if (!isPasswordCorrect) {
+      user.failedLoginAttempts += 1;
+
+      // Lock account after 5 failed attempts
+      if (user.failedLoginAttempts >= 5) {
+        user.lockUntil = new Date(
+          Date.now() + 15 * 60 * 1000
+        );
+
+        await user.save();
+
+        return res.status(423).json({
+          success: false,
+          message: "Too many failed attempts. Account locked for 15 minutes.",
+        });
+      }
+
+      await user.save();
+
       return res.status(401).json({
         success: false,
         message: "Invalid email or password",
+        remainingAttempts: 5 - user.failedLoginAttempts,
       });
     }
+
+    // 7. Reset failed attempts after successful login
+    user.failedLoginAttempts = 0;
+    user.lockUntil = null;
+    await user.save();
+
+    // 8. Generate access and refresh tokens
     const token = generateToken(user);
     const refreshToken = generateRefreshToken(user);
+
+    // 9. Set refresh token cookie
     res.cookie("refreshToken", refreshToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
       sameSite: "strict",
       maxAge: 7 * 24 * 60 * 60 * 1000,
     });
-   await RefreshToken.create({
-  token: hashToken(refreshToken),
-  user: user._id,
-  expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-});
-    // Login successful
-    res.status(200).json({
+
+    // 10. Save hashed refresh token
+    await RefreshToken.create({
+      token: hashToken(refreshToken),
+      user: user._id,
+      expiresAt: new Date(
+        Date.now() + 7 * 24 * 60 * 60 * 1000
+      ),
+    });
+
+    // 11. Return successful login
+    return res.status(200).json({
       success: true,
       message: "Login successful",
       token,
@@ -142,15 +199,17 @@ const login = async (req, res) => {
         role: user.role,
       },
     });
+
   } catch (error) {
     console.error(error);
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: "Something went wrong",
     });
   }
 };
+
 const verifyAccount = async (req, res) => {
   try {
     const validation = verifyAccountSchema.safeParse(req.body);
