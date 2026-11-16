@@ -24,7 +24,11 @@
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^9.10.0",
     "multer": "^2.5.0",
+    "passport": "^0.7.0",
+    "passport-google-oauth20": "^2.0.0",
+    "qrcode": "^1.5.4",
     "slugify": "^1.6.9",
+    "speakeasy": "^2.0.0",
     "zod": "^4.6.5"
   }
 }

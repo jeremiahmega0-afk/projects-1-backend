@@ -3,6 +3,7 @@ const Article = require("../models/article.model");
 const Category = require("../models/category.model");
 const ArticleView = require("../models/articleView.model");
 const slugify = require("slugify");
+const cloudinary = require("../config/cloudinary");
 
 const {
   createArticleSchema,
@@ -52,9 +53,10 @@ const createArticle = async (req, res) => {
       title,
       slug,
       content,
-      coverImage,
-      category,
+      coverImage: coverImage || "",
+      coverImagePublicId: req.body.coverImagePublicId || "",
       author: req.user.id,
+      category,
     });
 
     res.status(201).json({
@@ -338,8 +340,13 @@ const getMyArticleById = async (req, res) => {
 };
 const updateArticle = async (req, res) => {
   try {
-    // 1. Validate the request body
-    const validationResult = updateArticleSchema.safeParse(req.body);
+    // 1. Remove the server-generated public ID before validating user input
+    const bodyToValidate = { ...req.body };
+
+    delete bodyToValidate.coverImagePublicId;
+
+    // Validate the request body
+    const validationResult = updateArticleSchema.safeParse(bodyToValidate);
 
     if (!validationResult.success) {
       return res.status(400).json({
@@ -376,6 +383,9 @@ const updateArticle = async (req, res) => {
         message: "Article not found",
       });
     }
+
+    // Remember the old cover image before replacing it
+    const oldCoverImagePublicId = article.coverImagePublicId;
 
     // 4. Check ownership BEFORE changing anything
     const articleAuthorId = article.author.toString();
@@ -469,6 +479,11 @@ const updateArticle = async (req, res) => {
       article.coverImage = coverImage;
     }
 
+    // Save the new Cloudinary public ID when a new image is uploaded
+    if (req.file && req.body.coverImagePublicId) {
+      article.coverImagePublicId = req.body.coverImagePublicId;
+    }
+
     if (category !== undefined) {
       article.category = category || null;
     }
@@ -483,6 +498,23 @@ const updateArticle = async (req, res) => {
 
     // 9. Save only after all checks pass
     await article.save();
+
+    // Delete the old cover image after the new article data is saved
+    if (
+      req.file &&
+      oldCoverImagePublicId &&
+      oldCoverImagePublicId !== article.coverImagePublicId
+    ) {
+      try {
+        await cloudinary.uploader.destroy(oldCoverImagePublicId, {
+          resource_type: "image",
+        });
+
+        console.log("Old article cover image deleted successfully");
+      } catch (cloudinaryError) {
+        console.error("Failed to delete old article cover image:", cloudinaryError);
+      }
+    }
 
     return res.status(200).json({
       success: true,
@@ -537,7 +569,24 @@ const deleteArticle = async (req, res) => {
       });
     }
 
+    // Delete the article from MongoDB first
     await article.deleteOne();
+
+    // Delete its cover image from Cloudinary
+    if (article.coverImagePublicId) {
+      try {
+        await cloudinary.uploader.destroy(article.coverImagePublicId, {
+          resource_type: "image",
+        });
+
+        console.log("Article cover image deleted from Cloudinary");
+      } catch (cloudinaryError) {
+        console.error(
+          "Failed to delete article cover image from Cloudinary:",
+          cloudinaryError
+        );
+      }
+    }
 
     return res.status(200).json({
       success: true,
@@ -1192,8 +1241,8 @@ const getViewsByDateRange = async (req, res) => {
     }
 
     // Convert the dates into JavaScript Date objects.
-   const start = new Date(`${startDate}T00:00:00.000+01:00`);
-const end = new Date(`${endDate}T23:59:59.999+01:00`);
+    const start = new Date(`${startDate}T00:00:00.000+01:00`);
+    const end = new Date(`${endDate}T23:59:59.999+01:00`);
 
     // Check that the dates are valid.
     if (

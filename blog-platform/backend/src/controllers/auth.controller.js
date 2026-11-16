@@ -7,6 +7,11 @@ const Verification = require("../models/verification.model");
 const generateOtp = require("../utils/generateOtp");
 const generateRefreshToken = require("../utils/generateRefreshToken");
 const hashToken = require("../utils/hashToken");
+const speakeasy = require("speakeasy");
+
+const {
+  decryptTwoFactorSecret,
+} = require("../utils/twoFactor.utils");
 const {
   registerSchema,
   loginSchema,
@@ -166,6 +171,29 @@ const login = async (req, res) => {
     user.lockUntil = null;
     await user.save();
 
+
+    // 7A. Check whether the user has enabled 2FA
+    if (user.twoFactorEnabled) {
+      const challengeToken = jwt.sign(
+        {
+          id: user._id,
+          purpose: "2fa-login",
+        },
+        process.env.JWT_SECRET,
+        {
+          expiresIn: "5m",
+        }
+      );
+
+      return res.status(200).json({
+        success: true,
+        twoFactorRequired: true,
+        message: "Enter your six-digit authentication code",
+        challengeToken,
+      });
+    }
+
+
     // 8. Generate access and refresh tokens
     const token = generateToken(user);
     const refreshToken = generateRefreshToken(user);
@@ -209,6 +237,119 @@ const login = async (req, res) => {
     });
   }
 };
+
+
+const verifyTwoFactorLogin = async (req, res) => {
+  try {
+    const { challengeToken, token } = req.body;
+
+    // 1. Check the submitted information
+    if (
+      !challengeToken ||
+      !/^\d{6}$/.test(String(token || ""))
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Challenge token and six-digit code are required",
+      });
+    }
+
+    // 2. Verify the temporary login challenge
+    let decoded;
+
+    try {
+      decoded = jwt.verify(
+        challengeToken,
+        process.env.JWT_SECRET
+      );
+    } catch (error) {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid or expired login challenge",
+      });
+    }
+
+    if (decoded.purpose !== "2fa-login" || !decoded.id) {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid login challenge",
+      });
+    }
+
+    // 3. Find the user
+    const user = await User.findById(decoded.id);
+
+    if (!user || !user.twoFactorEnabled || !user.twoFactorSecret) {
+      return res.status(401).json({
+        success: false,
+        message: "Two-factor authentication is not available",
+      });
+    }
+
+    // 4. Decrypt the user's 2FA secret
+    const secret = decryptTwoFactorSecret(
+      user.twoFactorSecret
+    );
+
+    // 5. Verify the six-digit code
+    const verified = speakeasy.totp.verify({
+      secret,
+      encoding: "base32",
+      token: String(token),
+      window: 1,
+    });
+
+    if (!verified) {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid authentication code",
+      });
+    }
+
+    // 6. Generate normal access and refresh tokens
+    const accessToken = generateToken(user);
+    const refreshToken = generateRefreshToken(user);
+
+    // 7. Set the refresh token cookie
+    res.cookie("refreshToken", refreshToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "strict",
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+    });
+
+    // 8. Save the hashed refresh token
+    await RefreshToken.create({
+      token: hashToken(refreshToken),
+      user: user._id,
+      expiresAt: new Date(
+        Date.now() + 7 * 24 * 60 * 60 * 1000
+      ),
+    });
+
+    // 9. Return successful login
+    return res.status(200).json({
+      success: true,
+      message: "Login successful",
+      token: accessToken,
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+      },
+    });
+
+  } catch (error) {
+    console.error("2FA login error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Could not complete login",
+    });
+  }
+};
+
 
 const verifyAccount = async (req, res) => {
   try {
@@ -723,9 +864,50 @@ await RefreshToken.findOneAndUpdate(
   }
 };
 
+
+const logoutAllDevices = async (req, res) => {
+  try {
+    // Find the logged-in user
+    const userId = req.user.id;
+
+    // Revoke every active refresh token belonging to this user
+    const result = await RefreshToken.updateMany(
+      {
+        user: userId,
+        revoked: false,
+      },
+      {
+        $set: { revoked: true },
+      }
+    );
+
+    // Clear the current device's refresh-token cookie
+    res.clearCookie("refreshToken", {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "strict",
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Logged out from all devices successfully",
+      sessionsRevoked: result.modifiedCount,
+    });
+  } catch (error) {
+    console.error(error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to log out from all devices",
+    });
+  }
+};
+
+
 module.exports = {
   register,
   login,
+   verifyTwoFactorLogin,
   verifyAccount,
   resendOtp,
   refreshAccessToken,
@@ -733,4 +915,5 @@ module.exports = {
   resetPassword,
   changePassword,
    logout,
+   logoutAllDevices,
 };

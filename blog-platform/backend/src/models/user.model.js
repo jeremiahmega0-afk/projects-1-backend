@@ -27,6 +27,12 @@ const userSchema = new mongoose.Schema(
       trim: true,
     },
 
+    googleId: {
+      type: String,
+      unique: true,
+      sparse: true,
+    },
+
     password: {
       type: String,
       required: true,
@@ -58,6 +64,21 @@ const userSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    twoFactorEnabled: {
+      type: Boolean,
+      default: false,
+    },
+
+    twoFactorSecret: {
+      type: String,
+      default: null,
+    },
+
+    twoFactorTempSecret: {
+      type: String,
+      default: null,
+    },
+    
     // Number of consecutive failed login attempts
     failedLoginAttempts: {
       type: Number,

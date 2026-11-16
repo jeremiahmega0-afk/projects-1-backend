@@ -31,6 +31,7 @@ const {
 } = require("../validations/articleReaction.validation");
 const optionalProtect = require("../middleware/optionalAuth.middleware");
 
+
 const uploadCoverImage = async (req, res, next) => {
   if (!req.file) {
     return next();
@@ -42,12 +43,16 @@ const uploadCoverImage = async (req, res, next) => {
       "image",
       "blog-platform/articles"
     );
+
     req.body.coverImage = uploadedImage.url;
+    req.body.coverImagePublicId = uploadedImage.publicId;
+
     next();
   } catch (error) {
     next(error);
   }
 };
+
 
 const {
   createArticleSchema,

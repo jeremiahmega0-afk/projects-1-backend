@@ -27,6 +27,11 @@ const articleSchema = new mongoose.Schema(
       default: "",
     },
 
+    coverImagePublicId: {
+      type: String,
+      default: "",
+    },
+
     author: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
