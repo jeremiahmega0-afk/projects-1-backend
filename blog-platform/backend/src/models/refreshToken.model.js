@@ -23,6 +23,28 @@ const refreshTokenSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+
+
+    device: {
+      type: String,
+      default: "Unknown device",
+    },
+
+    browser: {
+      type: String,
+      default: "Unknown browser",
+    },
+
+    ipAddress: {
+      type: String,
+      default: "Unknown",
+    },
+
+    lastUsedAt: {
+      type: Date,
+      default: Date.now,
+    },
+
   },
   {
     timestamps: true,

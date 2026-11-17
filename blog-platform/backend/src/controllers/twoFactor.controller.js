@@ -6,6 +6,9 @@ const User = require("../models/user.model");
 const {
   encryptTwoFactorSecret,
 } = require("../utils/twoFactor.utils");
+const {
+  generateRecoveryCodes,
+} = require("../utils/recoveryCode.utils");
 
 // Start setting up two-factor authentication
 const setupTwoFactor = async (req, res) => {
@@ -134,7 +137,52 @@ const verifyAndEnableTwoFactor = async (req, res) => {
   }
 };
 
+
+const generateUserRecoveryCodes = async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id).select(
+      "+twoFactorRecoveryCodes"
+    );
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      });
+    }
+
+    if (!user.twoFactorEnabled) {
+      return res.status(400).json({
+        success: false,
+        message: "Enable two-factor authentication first",
+      });
+    }
+
+    const { codes, hashedCodes } = generateRecoveryCodes();
+
+    user.twoFactorRecoveryCodes = hashedCodes;
+
+    await user.save();
+
+    return res.status(200).json({
+      success: true,
+      message: "Recovery codes generated successfully. Save them somewhere safe.",
+      recoveryCodes: codes,
+    });
+
+  } catch (error) {
+    console.error("Recovery code generation error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Could not generate recovery codes",
+    });
+  }
+};
+
+
 module.exports = {
   setupTwoFactor,
   verifyAndEnableTwoFactor,
+  generateUserRecoveryCodes,
 };

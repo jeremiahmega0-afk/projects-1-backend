@@ -78,7 +78,13 @@ const userSchema = new mongoose.Schema(
       type: String,
       default: null,
     },
-    
+
+    twoFactorRecoveryCodes: {
+      type: [String],
+      default: [],
+      select: false,
+    },
+
     // Number of consecutive failed login attempts
     failedLoginAttempts: {
       type: Number,

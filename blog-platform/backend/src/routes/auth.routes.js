@@ -2,15 +2,18 @@ const express = require("express");
 const authLimiter = require("../middleware/auth-rate-limit.middleware");
 const protect = require("../middleware/auth.middleware");
 const passport = require("../config/passport");
+const twoFactorLimiter = require("../middleware/two-factor-rate-limit.middleware");
 
 const RefreshToken = require("../models/refreshToken.model");
 const generateRefreshToken = require("../utils/generateRefreshToken");
 const hashToken = require("../utils/hashToken");
+const { getDeviceInfo } = require("../utils/device.utils");
 
 const {
   register,
   login,
-   verifyTwoFactorLogin,
+  verifyTwoFactorLogin,
+  disableTwoFactor,
   verifyAccount,
   resendOtp,
   forgotPassword,
@@ -19,11 +22,16 @@ const {
   changePassword,
   logout,
   logoutAllDevices,
+  getActiveSessions,
+  revokeSession,
+  logoutOtherDevices,
+  createGoogleTwoFactorChallenge,
 } = require("../controllers/auth.controller");
 
 const {
   setupTwoFactor,
   verifyAndEnableTwoFactor,
+  generateUserRecoveryCodes,
 } = require("../controllers/twoFactor.controller");
 
 const router = express.Router();
@@ -44,6 +52,7 @@ router.post(
 );
 router.post("/logout", authLimiter, logout);
 router.post("/logout-all", protect, authLimiter, logoutAllDevices);
+router.get("/sessions", protect, getActiveSessions);
 
 // Start Google authentication
 router.get(
@@ -65,14 +74,27 @@ router.get(
     try {
       const user = req.user;
 
+      // Require 2FA verification if enabled
+      if (user.twoFactorEnabled) {
+        return createGoogleTwoFactorChallenge(req, res);
+      }
+
       const refreshToken = generateRefreshToken(user);
 
+      // Get information about the device logging in
+      const deviceInfo = getDeviceInfo(req);
+
+      // Save refresh token and device information
       await RefreshToken.create({
         token: hashToken(refreshToken),
         user: user._id,
         expiresAt: new Date(
           Date.now() + 7 * 24 * 60 * 60 * 1000
         ),
+        device: deviceInfo.device,
+        browser: deviceInfo.browser,
+        ipAddress: deviceInfo.ipAddress,
+        lastUsedAt: new Date(),
       });
 
       res.cookie("refreshToken", refreshToken, {
@@ -99,6 +121,24 @@ router.post("/2fa/setup", protect, setupTwoFactor);
 
 router.post("/2fa/verify", protect, verifyAndEnableTwoFactor);
 
-router.post("/2fa/login", verifyTwoFactorLogin);
+router.post(
+  "/2fa/login",
+  twoFactorLimiter,
+  verifyTwoFactorLogin
+);
+
+router.post("/2fa/disable", protect, disableTwoFactor);
+
+router.post(
+  "/2fa/recovery-codes",
+  protect,
+  generateUserRecoveryCodes
+);
+
+// Logout all other devices FIRST
+router.delete("/sessions/others", protect, logoutOtherDevices);
+
+// Revoke one specific session SECOND
+router.delete("/sessions/:sessionId", protect, revokeSession);
 
 module.exports = router;

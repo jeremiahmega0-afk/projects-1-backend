@@ -142,7 +142,7 @@ const updateCommentReportStatus = async (req, res) => {
     const report = await CommentReport.findByIdAndUpdate(
       reportId,
       { status },
-      { new: true, runValidators: true }
+      { returnDocument: "after", runValidators: true }
     );
 
     if (!report) {

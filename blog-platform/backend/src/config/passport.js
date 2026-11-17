@@ -6,11 +6,14 @@ const bcrypt = require("bcrypt");
 
 passport.use(
     new GoogleStrategy(
-        {
-            clientID: process.env.GOOGLE_CLIENT_ID,
-            clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-            callbackURL: process.env.GOOGLE_CALLBACK_URL,
-        },
+      {
+    clientID: process.env.GOOGLE_CLIENT_ID,
+    clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+    callbackURL: process.env.GOOGLE_CALLBACK_URL,
+
+    tokenURL: "https://oauth2.googleapis.com/token",
+    userProfileURL: "https://openidconnect.googleapis.com/v1/userinfo",
+},
         async (accessToken, refreshToken, profile, done) => {
             try {
                 // Get Google's verified email

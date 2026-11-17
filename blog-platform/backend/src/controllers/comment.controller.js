@@ -195,7 +195,7 @@ const toggleCommentLike = async (req, res) => {
     },
   ],
   {
-    new: true,
+    returnDocument: "after",
     updatePipeline: true,
   }
 );
