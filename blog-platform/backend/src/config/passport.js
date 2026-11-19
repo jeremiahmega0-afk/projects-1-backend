@@ -12,7 +12,7 @@ passport.use(
     callbackURL: process.env.GOOGLE_CALLBACK_URL,
 
     tokenURL: "https://oauth2.googleapis.com/token",
-    userProfileURL: "https://openidconnect.googleapis.com/v1/userinfo",
+    userProfileURL: "https://www.googleapis.com/oauth2/v3/userinfo",
 },
         async (accessToken, refreshToken, profile, done) => {
             try {

@@ -1,3 +1,4 @@
+const mongoose = require("mongoose");
 const User = require("../models/user.model");
 const bcrypt = require("bcrypt");
 const RefreshToken = require("../models/refreshToken.model");
@@ -58,21 +59,72 @@ const register = async (req, res) => {
     });
     const otp = generateOtp();
 
+    const hashedOtp = hashOtp(otp);
+
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
     await Verification.findOneAndUpdate(
       { email },
       {
         email,
-        otp,
+        otp: hashedOtp,
+        purpose: "register",
+        attempts: 0,
         expiresAt,
       },
       {
         upsert: true,
         returnDocument: "after",
+        runValidators: true,
       }
     );
-    console.log(`Verification OTP for ${email}: ${otp}`);
+
+    try {
+      await sendEmail({
+        to: user.email,
+        subject: "Jerry Blog Platform - Verify Your Email",
+        text: `Welcome to Jerry Blog Platform! Your email verification code is ${otp}. It expires in 10 minutes. Never share this code with anyone.`,
+        html: `
+    <!DOCTYPE html>
+    <html lang="en">
+    <body style="margin:0;padding:30px;background:#f3f4f6;font-family:Arial,sans-serif;">
+      <div style="max-width:500px;margin:auto;background:#ffffff;padding:30px;border-radius:12px;text-align:center;">
+        <h1 style="color:#4f46e5;">Jerry Blog Platform</h1>
+
+        <h2>Verify your email address</h2>
+
+        <p>Welcome! Thank you for creating an account.</p>
+
+        <p>Use the verification code below to activate your account:</p>
+
+        <h1 style="color:#4338ca;letter-spacing:10px;background:#eef2ff;padding:20px;border-radius:8px;">
+          ${otp}
+        </h1>
+
+        <p>This code expires in <strong>10 minutes</strong>.</p>
+
+        <p style="color:#dc2626;">
+          Never share this code with anyone.
+        </p>
+
+        <p style="font-size:12px;color:#9ca3af;">
+          &copy; ${new Date().getFullYear()} Jerry Blog Platform.
+          All rights reserved.
+        </p>
+      </div>
+    </body>
+    </html>
+  `,
+      });
+    } catch (emailError) {
+      await Verification.deleteOne({
+        email,
+        purpose: "register",
+        otp: hashedOtp,
+      });
+
+      throw emailError;
+    }
 
     res.status(201).json({
       success: true,
@@ -87,6 +139,13 @@ const register = async (req, res) => {
   } catch (error) {
     console.error(error);
 
+    if (error.code === 11000) {
+      return res.status(409).json({
+        success: false,
+        message: "An account with this email or username already exists",
+      });
+    }
+
     res.status(500).json({
       success: false,
       message: "Something went wrong",
@@ -94,9 +153,12 @@ const register = async (req, res) => {
   }
 };
 
+
 const login = async (req, res) => {
+  let session;
+
   try {
-    // 1. Validate the login information
+    // 1. Validate login information
     const validation = loginSchema.safeParse(req.body);
 
     if (!validation.success) {
@@ -109,7 +171,7 @@ const login = async (req, res) => {
     const email = validation.data.email.trim().toLowerCase();
     const password = validation.data.password;
 
-    // 2. Find the user
+    // 2. Find user
     const user = await User.findOne({ email });
 
     if (!user) {
@@ -119,7 +181,7 @@ const login = async (req, res) => {
       });
     }
 
-    // 3. Check whether the account is locked
+    // 3. Check account lock
     const now = new Date();
 
     if (user.lockUntil && user.lockUntil > now) {
@@ -133,29 +195,41 @@ const login = async (req, res) => {
       });
     }
 
-    // 4. Reset expired lockout
+    // 4. Reset expired lock
     if (user.lockUntil && user.lockUntil <= now) {
       user.failedLoginAttempts = 0;
       user.lockUntil = null;
     }
 
-    // 5. Compare the password
+    // 5. Check password
     const isPasswordCorrect = await bcrypt.compare(
       password,
       user.password
     );
 
-    // 6. Handle incorrect password
     if (!isPasswordCorrect) {
-      user.failedLoginAttempts += 1;
+      const updatedUser = await User.findOneAndUpdate(
+        { _id: user._id },
+        { $inc: { failedLoginAttempts: 1 } },
+        { returnDocument: "after" }
+      );
 
-      // Lock account after 5 failed attempts
-      if (user.failedLoginAttempts >= 5) {
-        user.lockUntil = new Date(
+      if (updatedUser.failedLoginAttempts >= 5) {
+        const lockUntil = new Date(
           Date.now() + 15 * 60 * 1000
         );
 
-        await user.save();
+        await User.updateOne(
+          {
+            _id: user._id,
+            failedLoginAttempts: { $gte: 5 },
+            $or: [
+              { lockUntil: null },
+              { lockUntil: { $lte: new Date() } },
+            ],
+          },
+          { $set: { lockUntil } }
+        );
 
         return res.status(423).json({
           success: false,
@@ -163,22 +237,25 @@ const login = async (req, res) => {
         });
       }
 
-      await user.save();
-
       return res.status(401).json({
         success: false,
         message: "Invalid email or password",
-        remainingAttempts: 5 - user.failedLoginAttempts,
+        remainingAttempts: 5 - updatedUser.failedLoginAttempts,
       });
     }
 
-    // 7. Reset failed attempts after successful login
-    user.failedLoginAttempts = 0;
-    user.lockUntil = null;
-    await user.save();
+    // 6. Reset failed attempts
+    await User.updateOne(
+      { _id: user._id },
+      {
+        $set: {
+          failedLoginAttempts: 0,
+          lockUntil: null,
+        },
+      }
+    );
 
-
-    // 7A. Check whether the user has enabled 2FA
+    // 7. Check 2FA
     if (user.twoFactorEnabled) {
       const challengeId = require("crypto").randomUUID();
 
@@ -189,12 +266,9 @@ const login = async (req, res) => {
           jti: challengeId,
         },
         process.env.JWT_SECRET,
-        {
-          expiresIn: "5m",
-        }
+        { expiresIn: "5m" }
       );
 
-      // Save the challenge in MongoDB
       await TwoFactorChallenge.create({
         jti: challengeId,
         user: user._id,
@@ -209,32 +283,42 @@ const login = async (req, res) => {
       });
     }
 
-
-    // 8. Generate access and refresh tokens
+    // 8. Generate tokens
     const token = generateToken(user);
     const refreshToken = generateRefreshToken(user);
+    const deviceInfo = getDeviceInfo(req);
 
-    // 9. Set refresh token cookie
+    const expiresAt = new Date(
+      Date.now() + 7 * 24 * 60 * 60 * 1000
+    );
+
+    // 9. Save refresh token in a transaction
+    session = await mongoose.startSession();
+
+    await session.withTransaction(async () => {
+      await RefreshToken.create(
+        [
+          {
+            token: hashToken(refreshToken),
+            user: user._id,
+            expiresAt,
+            device: deviceInfo.device,
+            browser: deviceInfo.browser,
+            ipAddress: deviceInfo.ipAddress,
+            lastUsedAt: new Date(),
+          },
+        ],
+        { session }
+      );
+    });
+
+    // 10. Set cookie only after successful database save
     res.cookie("refreshToken", refreshToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
       sameSite: "strict",
       maxAge: 7 * 24 * 60 * 60 * 1000,
-    });
-
-    // 10. Save hashed refresh token and device information
-    const deviceInfo = getDeviceInfo(req);
-
-    await RefreshToken.create({
-      token: hashToken(refreshToken),
-      user: user._id,
-      expiresAt: new Date(
-        Date.now() + 7 * 24 * 60 * 60 * 1000
-      ),
-      device: deviceInfo.device,
-      browser: deviceInfo.browser,
-      ipAddress: deviceInfo.ipAddress,
-      lastUsedAt: new Date(),
+      path: "/",
     });
 
     // 11. Return successful login
@@ -251,19 +335,33 @@ const login = async (req, res) => {
     });
 
   } catch (error) {
-    console.error(error);
+    console.error("Login error:", error);
+
+    if (
+      error.name === "MongoServerSelectionError" ||
+      error.name === "MongoNetworkError"
+    ) {
+      return res.status(503).json({
+        success: false,
+        message: "Database temporarily unavailable. Please try again shortly.",
+      });
+    }
 
     return res.status(500).json({
       success: false,
       message: "Something went wrong",
     });
+
+  } finally {
+    if (session) {
+      await session.endSession();
+    }
   }
 };
 
-
-
-
 const verifyTwoFactorLogin = async (req, res) => {
+  let session;
+
   try {
     const { token, recoveryCode } = req.body;
 
@@ -271,17 +369,14 @@ const verifyTwoFactorLogin = async (req, res) => {
       req.body.challengeToken ||
       req.cookies?.twoFactorChallenge;
 
-    // 1. The user must provide exactly one verification method
     const hasToken = Boolean(token);
     const hasRecoveryCode = Boolean(recoveryCode);
 
-    if (
-      !challengeToken ||
-      hasToken === hasRecoveryCode
-    ) {
+    if (!challengeToken || hasToken === hasRecoveryCode) {
       return res.status(400).json({
         success: false,
-        message: "Provide a challenge token and either an authenticator code or recovery code",
+        message:
+          "Provide a challenge token and either an authenticator code or recovery code",
       });
     }
 
@@ -302,7 +397,7 @@ const verifyTwoFactorLogin = async (req, res) => {
       });
     }
 
-    // 2. Verify the temporary login challenge
+    // Verify the temporary login challenge
     let decoded;
 
     try {
@@ -328,22 +423,7 @@ const verifyTwoFactorLogin = async (req, res) => {
       });
     }
 
-    // 3. Check whether the challenge is valid
-    const challenge = await TwoFactorChallenge.findOne({
-      jti: decoded.jti,
-      user: decoded.id,
-      used: false,
-      expiresAt: { $gt: new Date() },
-    });
-
-    if (!challenge) {
-      return res.status(401).json({
-        success: false,
-        message: "Login challenge has expired or has already been used",
-      });
-    }
-
-    // 4. Find the user and explicitly load recovery-code hashes
+    // Find the user
     const user = await User.findById(decoded.id).select(
       "+twoFactorRecoveryCodes"
     );
@@ -359,10 +439,10 @@ const verifyTwoFactorLogin = async (req, res) => {
       });
     }
 
+    // Verify the authentication method
     let verified = false;
     let hashedRecoveryCode = null;
 
-    // 5. Verify using the authenticator app
     if (hasToken) {
       const secret = decryptTwoFactorSecret(
         user.twoFactorSecret
@@ -376,7 +456,6 @@ const verifyTwoFactorLogin = async (req, res) => {
       });
     }
 
-    // 6. Or check whether the recovery code exists
     if (hasRecoveryCode) {
       hashedRecoveryCode = hashRecoveryCode(
         String(recoveryCode).trim().toUpperCase()
@@ -394,61 +473,83 @@ const verifyTwoFactorLogin = async (req, res) => {
       });
     }
 
-    // 7. Consume the login challenge atomically
-    const consumedChallenge =
-      await TwoFactorChallenge.findOneAndUpdate(
-        {
-          jti: decoded.jti,
-          user: decoded.id,
-          used: false,
-          expiresAt: { $gt: new Date() },
-        },
-        {
-          $set: { used: true },
-        },
-        {
-          returnDocument: "after",
-        }
-      );
-
-    if (!consumedChallenge) {
-      return res.status(401).json({
-        success: false,
-        message: "Login challenge has already been used or expired",
-      });
-    }
-
-    // 8. Remove the recovery code atomically so it cannot be reused
-    if (hasRecoveryCode) {
-      const updatedUser = await User.findOneAndUpdate(
-        {
-          _id: user._id,
-          twoFactorEnabled: true,
-          twoFactorRecoveryCodes: hashedRecoveryCode,
-        },
-        {
-          $pull: {
-            twoFactorRecoveryCodes: hashedRecoveryCode,
-          },
-        },
-        {
-          returnDocument: "after",
-        }
-      );
-
-      if (!updatedUser) {
-        return res.status(401).json({
-          success: false,
-          message: "Recovery code has already been used or is invalid",
-        });
-      }
-    }
-
-    // 9. Generate normal access and refresh tokens
+    // Prepare tokens and device information
     const accessToken = generateToken(user);
     const refreshToken = generateRefreshToken(user);
+    const deviceInfo = getDeviceInfo(req);
 
-    // 10. Set the refresh token cookie
+    const expiresAt = new Date(
+      Date.now() + 7 * 24 * 60 * 60 * 1000
+    );
+
+    // Start MongoDB transaction
+    session = await mongoose.startSession();
+
+    await session.withTransaction(async () => {
+      // Consume challenge
+      const consumedChallenge =
+        await TwoFactorChallenge.findOneAndUpdate(
+          {
+            jti: decoded.jti,
+            user: decoded.id,
+            used: false,
+            expiresAt: { $gt: new Date() },
+          },
+          {
+            $set: { used: true },
+          },
+          {
+            returnDocument: "after",
+            session,
+          }
+        );
+
+      if (!consumedChallenge) {
+        throw new Error("LOGIN_CHALLENGE_INVALID");
+      }
+
+      // Consume recovery code if used
+      if (hasRecoveryCode) {
+        const updatedUser = await User.findOneAndUpdate(
+          {
+            _id: user._id,
+            twoFactorEnabled: true,
+            twoFactorRecoveryCodes: hashedRecoveryCode,
+          },
+          {
+            $pull: {
+              twoFactorRecoveryCodes: hashedRecoveryCode,
+            },
+          },
+          {
+            returnDocument: "after",
+            session,
+          }
+        );
+
+        if (!updatedUser) {
+          throw new Error("RECOVERY_CODE_INVALID");
+        }
+      }
+
+      // Save refresh token
+      await RefreshToken.create(
+        [
+          {
+            token: hashToken(refreshToken),
+            user: user._id,
+            expiresAt,
+            device: deviceInfo.device,
+            browser: deviceInfo.browser,
+            ipAddress: deviceInfo.ipAddress,
+            lastUsedAt: new Date(),
+          },
+        ],
+        { session }
+      );
+    });
+
+    // Send cookies only after transaction succeeds
     res.cookie("refreshToken", refreshToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
@@ -463,21 +564,6 @@ const verifyTwoFactorLogin = async (req, res) => {
       path: "/api/v1/auth/2fa",
     });
 
-    // Save hashed refresh token and device information
-    const deviceInfo = getDeviceInfo(req);
-
-    await RefreshToken.create({
-      token: hashToken(refreshToken),
-      user: user._id,
-      expiresAt: new Date(
-        Date.now() + 7 * 24 * 60 * 60 * 1000
-      ),
-      device: deviceInfo.device,
-      browser: deviceInfo.browser,
-      ipAddress: deviceInfo.ipAddress,
-      lastUsedAt: new Date(),
-    });
-    // 12. Return successful login
     return res.status(200).json({
       success: true,
       message: "Login successful",
@@ -489,16 +575,33 @@ const verifyTwoFactorLogin = async (req, res) => {
         role: user.role,
       },
     });
-
   } catch (error) {
+    if (
+      error.message === "LOGIN_CHALLENGE_INVALID" ||
+      error.message === "RECOVERY_CODE_INVALID"
+    ) {
+      return res.status(401).json({
+        success: false,
+        message:
+          error.message === "LOGIN_CHALLENGE_INVALID"
+            ? "Login challenge has already been used or expired"
+            : "Recovery code has already been used or is invalid",
+      });
+    }
+
     console.error("2FA login error:", error);
 
     return res.status(500).json({
       success: false,
       message: "Could not complete login",
     });
+  } finally {
+    if (session) {
+      await session.endSession();
+    }
   }
 };
+
 
 
 const disableTwoFactor = async (req, res) => {
@@ -566,10 +669,12 @@ const disableTwoFactor = async (req, res) => {
       });
     }
 
-    // 6. Disable 2FA
+
+    // 6. Disable 2FA and clear recovery codes
     user.twoFactorEnabled = false;
     user.twoFactorSecret = null;
     user.twoFactorTempSecret = null;
+    user.twoFactorRecoveryCodes = [];
 
     await user.save();
 
@@ -610,8 +715,10 @@ const verifyAccount = async (req, res) => {
     }
 
     // Find verification record
-    const verification = await Verification.findOne({ email });
-
+    const verification = await Verification.findOne({
+      email,
+      purpose: "register",
+    });
     if (!verification) {
       return res.status(400).json({
         success: false,
@@ -630,7 +737,45 @@ const verifyAccount = async (req, res) => {
     }
 
     // Check OTP
-    if (verification.otp !== otp) {
+    // Check maximum attempts
+    if (verification.attempts >= 5) {
+      await Verification.deleteOne({
+        _id: verification._id,
+      });
+
+      return res.status(429).json({
+        success: false,
+        message: "Too many incorrect attempts. Request a new verification code.",
+      });
+    }
+
+    // Check OTP
+    if (verification.otp !== hashOtp(otp)) {
+      const updatedVerification = await Verification.findOneAndUpdate(
+        {
+          _id: verification._id,
+          purpose: "register",
+          attempts: { $lt: 5 },
+        },
+        {
+          $inc: { attempts: 1 },
+        },
+        {
+          returnDocument: "after",
+        }
+      );
+
+      if (updatedVerification && updatedVerification.attempts >= 5) {
+        await Verification.deleteOne({
+          _id: verification._id,
+        });
+
+        return res.status(429).json({
+          success: false,
+          message: "Too many incorrect attempts. Request a new verification code.",
+        });
+      }
+
       return res.status(400).json({
         success: false,
         message: "Invalid verification code",
@@ -647,12 +792,27 @@ const verifyAccount = async (req, res) => {
       });
     }
 
+    // Atomically consume the OTP
+    const consumedOtp = await Verification.findOneAndDelete({
+      _id: verification._id,
+      email,
+      purpose: "register",
+      otp: hashOtp(otp),
+      attempts: { $lt: 5 },
+      expiresAt: { $gt: new Date() },
+    });
+
+    // Stop if another request already consumed the OTP
+    if (!consumedOtp) {
+      return res.status(400).json({
+        success: false,
+        message: "Verification code is no longer valid or has already been used",
+      });
+    }
+
     // Verify account
     user.isVerified = true;
     await user.save();
-
-    // Delete OTP after successful verification
-    await Verification.deleteOne({ email });
 
     res.status(200).json({
       success: true,
@@ -667,6 +827,7 @@ const verifyAccount = async (req, res) => {
     });
   }
 };
+
 const resendOtp = async (req, res) => {
   try {
     const validation = emailSchema.safeParse(req.body);
@@ -682,21 +843,17 @@ const resendOtp = async (req, res) => {
 
     const user = await User.findOne({ email });
 
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: "User not found",
-      });
-    }
-
-    if (user.isVerified) {
-      return res.status(400).json({
-        success: false,
-        message: "Account is already verified",
+    if (!user || user.isVerified) {
+      return res.status(200).json({
+        success: true,
+        message:
+          "If an unverified account exists with this email, a verification code will be sent.",
       });
     }
 
     const otp = generateOtp();
+
+    const hashedOtp = hashOtp(otp);
 
     const expiresAt = new Date(
       Date.now() + 10 * 60 * 1000
@@ -706,20 +863,58 @@ const resendOtp = async (req, res) => {
       { email },
       {
         email,
-        otp,
+        otp: hashedOtp,
+        purpose: "register",
+        attempts: 0,
         expiresAt,
       },
       {
         upsert: true,
         returnDocument: "after",
+        runValidators: true,
       }
     );
+    try {
+      await sendEmail({
+        to: user.email,
+        subject: "Jerry Blog Platform - New Verification Code",
+        text: `Your new email verification code is ${otp}. It expires in 10 minutes. Never share this code with anyone.`,
+        html: `
+    <!DOCTYPE html>
+    <html lang="en">
+    <body style="margin:0;padding:30px;background:#f3f4f6;font-family:Arial,sans-serif;">
+      <div style="max-width:500px;margin:auto;background:#ffffff;padding:30px;border-radius:12px;text-align:center;">
+        <h1 style="color:#4f46e5;">Jerry Blog Platform</h1>
+        <h2>New verification code</h2>
+        <p>Use this code to verify your email address:</p>
+        <h1 style="color:#4338ca;letter-spacing:10px;background:#eef2ff;padding:20px;border-radius:8px;">
+          ${otp}
+        </h1>
+        <p>This code expires in <strong>10 minutes</strong>.</p>
+        <p style="color:#dc2626;">Never share this code with anyone.</p>
+        <p style="font-size:12px;color:#9ca3af;">
+          &copy; ${new Date().getFullYear()} Jerry Blog Platform.
+        </p>
+      </div>
+    </body>
+    </html>
+  `,
+      });
+    } catch (emailError) {
+      await Verification.deleteOne({
+        email,
+        purpose: "register",
+        otp: hashedOtp,
+      });
 
-    console.log(`New verification OTP for ${email}: ${otp}`);
+      throw emailError;
+    }
+
 
     res.status(200).json({
       success: true,
-      message: "New verification code sent successfully",
+      message:
+        "If an unverified account exists with this email, a verification code will be sent.",
     });
   } catch (error) {
     console.error(error);
@@ -774,11 +969,14 @@ const forgotPassword = async (req, res) => {
       {
         email: user.email,
         otp: hashedOtp,
+        purpose: "password-reset",
+        attempts: 0,
         expiresAt,
       },
       {
         upsert: true,
         returnDocument: "after",
+        runValidators: true,
       }
     );
 
@@ -789,16 +987,95 @@ const forgotPassword = async (req, res) => {
         subject: "Jerry Blog Platform - Password Reset",
         text: `Your password reset code is ${otp}. It expires in 10 minutes. If you did not request this, ignore this email.`,
         html: `
-          <div style="font-family: Arial, sans-serif; max-width: 500px; margin: auto;">
-            <h2>Jerry Blog Platform</h2>
-            <h3>Password Reset</h3>
-            <p>You requested to reset your password.</p>
-            <p>Your verification code is:</p>
-            <h1 style="letter-spacing: 5px;">${otp}</h1>
-            <p>This code expires in 10 minutes.</p>
-            <p>If you did not request this, you can ignore this email.</p>
-          </div>
-        `,
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="color-scheme" content="light only" />
+  <title>Password Reset</title>
+</head>
+<body style="margin:0; padding:0; background-color:#f3f4f6; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">
+
+  <!-- Preheader (inbox preview text) -->
+  <div style="display:none; max-height:0; overflow:hidden; opacity:0; color:#f3f4f6;">
+    Your Jerry Blog Platform verification code is ${otp}. It expires in 10 minutes.
+  </div>
+
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#f3f4f6; padding:32px 16px;">
+    <tr>
+      <td align="center">
+
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:520px; background-color:#ffffff; border-radius:12px; overflow:hidden; box-shadow:0 2px 8px rgba(0,0,0,0.06);">
+
+          <!-- Header -->
+          <tr>
+            <td align="center" style="background-color:#4f46e5; padding:28px 24px;">
+              <h1 style="margin:0; font-size:22px; font-weight:700; color:#ffffff; letter-spacing:0.5px;">
+                Jerry Blog Platform
+              </h1>
+            </td>
+          </tr>
+
+          <!-- Body -->
+          <tr>
+            <td style="padding:36px 32px 12px 32px; color:#374151;">
+              <h2 style="margin:0 0 12px 0; font-size:20px; color:#111827;">Reset your password</h2>
+              <p style="margin:0 0 8px 0; font-size:15px; line-height:1.6; color:#4b5563;">
+                We received a request to reset your password. Use the verification code below to continue:
+              </p>
+            </td>
+          </tr>
+
+          <!-- OTP box -->
+          <tr>
+            <td align="center" style="padding:16px 32px;">
+              <div style="display:inline-block; background-color:#eef2ff; border:2px dashed #818cf8; border-radius:10px; padding:18px 32px;">
+                <span style="font-family:'Courier New', Courier, monospace; font-size:34px; font-weight:700; letter-spacing:10px; color:#4338ca; padding-left:10px;">
+                  ${otp}
+                </span>
+              </div>
+            </td>
+          </tr>
+
+          <!-- Expiry note -->
+          <tr>
+            <td align="center" style="padding:4px 32px 24px 32px;">
+              <p style="margin:0; font-size:14px; color:#6b7280;">
+                This code expires in <strong style="color:#111827;">10 minutes</strong>.
+              </p>
+            </td>
+          </tr>
+
+          <!-- Security note -->
+          <tr>
+            <td style="padding:0 32px 32px 32px;">
+              <div style="background-color:#fef9c3; border-left:4px solid #eab308; border-radius:6px; padding:12px 16px;">
+                <p style="margin:0; font-size:13px; line-height:1.5; color:#713f12;">
+                  If you didn't request this, you can safely ignore this email. Never share this code with anyone.
+                </p>
+              </div>
+            </td>
+          </tr>
+
+          <!-- Footer -->
+          <tr>
+            <td align="center" style="background-color:#f9fafb; padding:20px 32px; border-top:1px solid #e5e7eb;">
+              <p style="margin:0; font-size:12px; color:#9ca3af; line-height:1.5;">
+                &copy; ${new Date().getFullYear()} Jerry Blog Platform. All rights reserved.<br />
+                This is an automated message, please do not reply.
+              </p>
+            </td>
+          </tr>
+
+        </table>
+
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
+`,
       });
     } catch (emailError) {
       // Remove the unusable verification record
@@ -829,7 +1106,10 @@ const forgotPassword = async (req, res) => {
 };
 
 
+
 const resetPassword = async (req, res) => {
+  let session;
+
   try {
     const validation = resetPasswordSchema.safeParse(req.body);
 
@@ -840,87 +1120,186 @@ const resetPassword = async (req, res) => {
       });
     }
 
-    const {
-      email,
-      otp,
-      newPassword,
-    } = validation.data;
-
-    const verification = await Verification.findOne({ email });
-
-    if (!verification) {
-      return res.status(400).json({
-        success: false,
-        message: "Reset code not found",
-      });
-    }
-
-    if (verification.expiresAt < new Date()) {
-      await Verification.deleteOne({ email });
-
-      return res.status(400).json({
-        success: false,
-        message: "Reset code has expired",
-      });
-    }
-
+    const { email, otp, newPassword } = validation.data;
     const submittedOtpHash = hashOtp(otp);
 
-    if (verification.otp !== submittedOtpHash) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid reset code",
-      });
-    }
+    const hashedPassword = await bcrypt.hash(newPassword, 12);
 
-    const user = await User.findOne({ email });
+    session = await mongoose.startSession();
 
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: "User not found",
-      });
-    }
+    let result = null;
 
-    const hashedPassword = await bcrypt.hash(
-      newPassword,
-      12
-    );
+    await session.withTransaction(async () => {
+      const verification = await Verification.findOne({
+        email,
+        purpose: "password-reset",
+      }).session(session);
 
-
-    user.password = hashedPassword;
-
-    await user.save();
-
-    // Revoke all refresh tokens for this user
-    await RefreshToken.updateMany(
-      {
-        user: user._id,
-        revoked: false,
-      },
-      {
-        $set: { revoked: true },
+      if (!verification) {
+        result = {
+          status: 400,
+          message: "Reset code not found",
+        };
+        return;
       }
-    );
 
-    await Verification.deleteOne({ email });
+      if (verification.expiresAt <= new Date()) {
+        await Verification.deleteOne(
+          { _id: verification._id },
+          { session }
+        );
 
+        result = {
+          status: 400,
+          message: "Reset code has expired",
+        };
+        return;
+      }
 
-    res.status(200).json({
-      success: true,
-      message: "Password reset successfully",
+      if (verification.attempts >= 5) {
+        await Verification.deleteOne(
+          { _id: verification._id },
+          { session }
+        );
+
+        result = {
+          status: 429,
+          message: "Too many incorrect attempts. Request a new reset code.",
+        };
+        return;
+      }
+
+      if (verification.otp !== submittedOtpHash) {
+        const updatedVerification = await Verification.findOneAndUpdate(
+          {
+            _id: verification._id,
+            purpose: "password-reset",
+            attempts: { $lt: 5 },
+            expiresAt: { $gt: new Date() },
+          },
+          {
+            $inc: { attempts: 1 },
+          },
+          {
+            returnDocument: "after",
+            session,
+          }
+        );
+
+        if (!updatedVerification) {
+          result = {
+            status: 400,
+            message: "Reset code is invalid, expired, or already used",
+          };
+          return;
+        }
+
+        if (updatedVerification.attempts >= 5) {
+          await Verification.deleteOne(
+            { _id: verification._id },
+            { session }
+          );
+
+          result = {
+            status: 429,
+            message: "Too many incorrect attempts. Request a new reset code.",
+          };
+          return;
+        }
+
+        result = {
+          status: 400,
+          message: "Invalid reset code",
+        };
+        return;
+      }
+
+      const user = await User.findOne({ email }).session(session);
+
+      if (!user) {
+        result = {
+          status: 404,
+          message: "User not found",
+        };
+        return;
+      }
+
+      // Consume the OTP exactly once
+      const consumedVerification = await Verification.findOneAndDelete(
+        {
+          _id: verification._id,
+          email,
+          purpose: "password-reset",
+          otp: submittedOtpHash,
+          attempts: { $lt: 5 },
+          expiresAt: { $gt: new Date() },
+        },
+        { session }
+      );
+
+      if (!consumedVerification) {
+        result = {
+          status: 400,
+          message: "Reset code is invalid, expired, or already used",
+        };
+        return;
+      }
+
+      // Save the new password
+      user.password = hashedPassword;
+      await user.save({ session });
+
+      // Revoke all active refresh tokens
+      await RefreshToken.updateMany(
+        {
+          user: user._id,
+          revoked: false,
+        },
+        {
+          $set: { revoked: true },
+        },
+        { session }
+      );
+
+      result = {
+        status: 200,
+        success: true,
+        message: "Password reset successfully",
+      };
     });
-  } catch (error) {
-    console.error(error);
 
-    res.status(500).json({
+    if (!result) {
+      return res.status(500).json({
+        success: false,
+        message: "Password reset could not be completed",
+      });
+    }
+
+    return res.status(result.status).json({
+      success: result.success || false,
+      message: result.message,
+    });
+
+  } catch (error) {
+    console.error("Password reset error:", error);
+
+    return res.status(500).json({
       success: false,
       message: "Something went wrong",
     });
+
+  } finally {
+    if (session) {
+      await session.endSession();
+    }
   }
 };
 
+
+
 const changePassword = async (req, res) => {
+  let session;
+
   try {
     const validation = changePasswordSchema.safeParse(req.body);
 
@@ -933,81 +1312,118 @@ const changePassword = async (req, res) => {
 
     const { currentPassword, newPassword } = validation.data;
 
-    // Find the logged-in user
-    const user = await User.findById(req.user.id);
+    // Hash the new password
+    const hashedPassword = await bcrypt.hash(newPassword, 12);
 
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: "User not found",
-      });
-    }
+    session = await mongoose.startSession();
 
-    // Verify the current password
-    const isPasswordCorrect = await bcrypt.compare(
-      currentPassword,
-      user.password
-    );
+    let result = null;
 
-    if (!isPasswordCorrect) {
-      return res.status(401).json({
-        success: false,
-        message: "Current password is incorrect",
-      });
-    }
+    await session.withTransaction(async () => {
+      // Find the user inside the transaction
+      const user = await User.findById(req.user.id).session(session);
 
-    // Prevent changing to the same password
-    const isSamePassword = await bcrypt.compare(
-      newPassword,
-      user.password
-    );
-
-    if (isSamePassword) {
-      return res.status(400).json({
-        success: false,
-        message: "New password must be different",
-      });
-    }
-
-    // Hash and save the new password
-    user.password = await bcrypt.hash(newPassword, 12);
-    await user.save();
-
-    // Revoke all active refresh tokens for this user
-    await RefreshToken.updateMany(
-      {
-        user: user._id,
-        revoked: false,
-      },
-      {
-        $set: { revoked: true },
+      if (!user) {
+        result = {
+          status: 404,
+          message: "User not found",
+        };
+        return;
       }
-    );
 
-    // Clear this browser's refresh-token cookie
-    res.clearCookie("refreshToken", {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "strict",
+      // Verify current password
+      const isPasswordCorrect = await bcrypt.compare(
+        currentPassword,
+        user.password
+      );
+
+      if (!isPasswordCorrect) {
+        result = {
+          status: 401,
+          message: "Current password is incorrect",
+        };
+        return;
+      }
+
+      // Prevent reusing the same password
+      const isSamePassword = await bcrypt.compare(
+        newPassword,
+        user.password
+      );
+
+      if (isSamePassword) {
+        result = {
+          status: 400,
+          message: "New password must be different",
+        };
+        return;
+      }
+
+      // Save the new password
+      user.password = hashedPassword;
+      await user.save({ session });
+
+      // Revoke all active refresh tokens
+      await RefreshToken.updateMany(
+        {
+          user: user._id,
+          revoked: false,
+        },
+        {
+          $set: { revoked: true },
+        },
+        { session }
+      );
+
+      result = {
+        status: 200,
+        success: true,
+        message: "Password changed successfully. Please log in again.",
+      };
     });
 
-    return res.status(200).json({
-      success: true,
-      message: "Password changed successfully. Please log in again.",
+    if (!result) {
+      return res.status(500).json({
+        success: false,
+        message: "Password change could not be completed",
+      });
+    }
+
+    if (result.success) {
+      res.clearCookie("refreshToken", {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        sameSite: "strict",
+      });
+    }
+
+    return res.status(result.status).json({
+      success: result.success || false,
+      message: result.message,
     });
+
   } catch (error) {
-    console.error(error);
+    console.error("Change password error:", error);
 
     return res.status(500).json({
       success: false,
       message: "Something went wrong",
     });
+
+  } finally {
+    if (session) {
+      await session.endSession();
+    }
   }
 };
 
+
+
 const refreshAccessToken = async (req, res) => {
+  let session;
+
   try {
-    const refreshToken = req.cookies.refreshToken;
+    const refreshToken = req.cookies?.refreshToken;
 
     if (!refreshToken) {
       return res.status(401).json({
@@ -1016,12 +1432,20 @@ const refreshAccessToken = async (req, res) => {
       });
     }
 
-    // 1. Verify the JWT
+    // 1. Verify the refresh-token JWT
     const decoded = jwt.verify(
       refreshToken,
       process.env.JWT_REFRESH_SECRET
     );
 
+    if (!decoded.id) {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid refresh token",
+      });
+    }
+
+    // 2. Find the hashed refresh token in MongoDB
     const storedToken = await RefreshToken.findOne({
       token: hashToken(refreshToken),
     });
@@ -1033,7 +1457,15 @@ const refreshAccessToken = async (req, res) => {
       });
     }
 
-    // 3. Check if token has been revoked
+    // 3. Check token ownership
+    if (storedToken.user.toString() !== decoded.id) {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid refresh token",
+      });
+    }
+
+    // 4. Check whether it was revoked
     if (storedToken.revoked) {
       return res.status(401).json({
         success: false,
@@ -1041,15 +1473,15 @@ const refreshAccessToken = async (req, res) => {
       });
     }
 
-    // 4. Check if token has expired in the database
-    if (storedToken.expiresAt < new Date()) {
+    // 5. Check expiration
+    if (storedToken.expiresAt <= new Date()) {
       return res.status(401).json({
         success: false,
         message: "Refresh token has expired",
       });
     }
 
-    // 5. Find the user
+    // 6. Find the user
     const user = await User.findById(decoded.id);
 
     if (!user) {
@@ -1059,64 +1491,103 @@ const refreshAccessToken = async (req, res) => {
       });
     }
 
-    const revokedToken = await RefreshToken.findOneAndUpdate(
-      {
-        _id: storedToken._id,
-        revoked: false,
-        expiresAt: { $gt: new Date() },
-      },
-      {
-        $set: { revoked: true },
-      },
-      {
-        returnDocument: "before",
-      }
-    );
-
-    if (!revokedToken) {
-      return res.status(401).json({
-        success: false,
-        message: "Refresh token has already been used or expired",
-      });
-    }
-
+    // 7. Generate replacement tokens
     const newRefreshToken = generateRefreshToken(user);
+    const newAccessToken = generateToken(user);
 
-
-    // Save the new refresh token and device information
     const deviceInfo = getDeviceInfo(req);
 
-    await RefreshToken.create({
-      token: hashToken(newRefreshToken),
-      user: user._id,
-      expiresAt: new Date(
-        Date.now() + 7 * 24 * 60 * 60 * 1000
-      ),
-      device: deviceInfo.device,
-      browser: deviceInfo.browser,
-      ipAddress: deviceInfo.ipAddress,
-      lastUsedAt: new Date(),
+    const expiresAt = new Date(
+      Date.now() + 7 * 24 * 60 * 60 * 1000
+    );
+
+    // 8. Start transaction
+    session = await mongoose.startSession();
+
+    await session.withTransaction(async () => {
+      // Revoke old token atomically
+      const revokedToken = await RefreshToken.findOneAndUpdate(
+        {
+          _id: storedToken._id,
+          user: user._id,
+          revoked: false,
+          expiresAt: { $gt: new Date() },
+        },
+        {
+          $set: { revoked: true },
+        },
+        {
+          returnDocument: "before",
+          session,
+        }
+      );
+
+      if (!revokedToken) {
+        throw new Error("REFRESH_TOKEN_ALREADY_USED");
+      }
+
+      // Save replacement token
+      await RefreshToken.create(
+        [
+          {
+            token: hashToken(newRefreshToken),
+            user: user._id,
+            expiresAt,
+            device: deviceInfo.device,
+            browser: deviceInfo.browser,
+            ipAddress: deviceInfo.ipAddress,
+            lastUsedAt: new Date(),
+          },
+        ],
+        { session }
+      );
     });
 
+    // 9. Send new cookie only after transaction succeeds
     res.cookie("refreshToken", newRefreshToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
       sameSite: "strict",
       maxAge: 7 * 24 * 60 * 60 * 1000,
+      path: "/",
     });
-    // 6. Generate a new access token
-    const newAccessToken = generateToken(user);
 
     return res.status(200).json({
       success: true,
       message: "Access token refreshed successfully",
       token: newAccessToken,
     });
+
   } catch (error) {
-    return res.status(401).json({
+    if (error.message === "REFRESH_TOKEN_ALREADY_USED") {
+      return res.status(401).json({
+        success: false,
+        message: "Refresh token has already been used or expired",
+      });
+    }
+
+    if (
+      error.name === "JsonWebTokenError" ||
+      error.name === "TokenExpiredError" ||
+      error.name === "NotBeforeError"
+    ) {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid or expired refresh token",
+      });
+    }
+
+    console.error("Refresh token error:", error);
+
+    return res.status(500).json({
       success: false,
-      message: "Invalid or expired refresh token",
+      message: "Could not refresh your session. Please try again.",
     });
+
+  } finally {
+    if (session) {
+      await session.endSession();
+    }
   }
 };
 
@@ -1124,6 +1595,19 @@ const logout = async (req, res) => {
   try {
     const refreshToken = req.cookies.refreshToken;
 
+    if (!refreshToken) {
+      res.clearCookie("refreshToken", {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        sameSite: "strict",
+        path: "/",
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: "Logout successful",
+      });
+    }
 
     await RefreshToken.findOneAndUpdate(
       {
@@ -1140,6 +1624,7 @@ const logout = async (req, res) => {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
       sameSite: "strict",
+      path: "/",
     });
 
     return res.status(200).json({
@@ -1240,6 +1725,14 @@ const getActiveSessions = async (req, res) => {
 
 const revokeSession = async (req, res) => {
   try {
+
+    if (!mongoose.isValidObjectId(req.params.sessionId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid session ID",
+      });
+    }
+
     const session = await RefreshToken.findOneAndUpdate(
       {
         _id: req.params.sessionId,
@@ -1251,7 +1744,7 @@ const revokeSession = async (req, res) => {
         $set: { revoked: true },
       },
       {
-        new: true,
+        returnDocument: "after",
       }
     );
 
@@ -1339,19 +1832,20 @@ const logoutOtherDevices = async (req, res) => {
   }
 };
 
+
+// Create a 2FA challenge after successful Google authentication
 const createGoogleTwoFactorChallenge = async (req, res) => {
   try {
     const user = req.user;
 
     if (!user || !user.twoFactorEnabled) {
-      return res.status(400).json({
-        success: false,
-        message: "Two-factor authentication is not enabled",
-      });
+      return res.redirect(`${process.env.FRONTEND_URL}/login`);
     }
 
+    // Generate a unique challenge ID
     const challengeId = require("crypto").randomUUID();
 
+    // Create a temporary challenge token
     const challengeToken = jwt.sign(
       {
         id: user._id,
@@ -1362,12 +1856,14 @@ const createGoogleTwoFactorChallenge = async (req, res) => {
       { expiresIn: "5m" }
     );
 
+    // Save the challenge in MongoDB
     await TwoFactorChallenge.create({
       jti: challengeId,
       user: user._id,
       expiresAt: new Date(Date.now() + 5 * 60 * 1000),
     });
 
+    // Store challenge in an HTTP-only cookie
     res.cookie("twoFactorChallenge", challengeToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
@@ -1376,20 +1872,24 @@ const createGoogleTwoFactorChallenge = async (req, res) => {
       path: "/api/v1/auth/2fa",
     });
 
+    // Send the user to the frontend 2FA page
     return res.redirect(
-      "http://localhost:5173/google-success?requires2FA=true"
+      `${process.env.FRONTEND_URL}/two-factor`
     );
+
   } catch (error) {
     console.error("Google 2FA challenge error:", error);
 
-    return res.redirect("http://localhost:5173/login");
+    return res.redirect(`${process.env.FRONTEND_URL}/login`);
   }
 };
+
 
 module.exports = {
   register,
   login,
   verifyTwoFactorLogin,
+  createGoogleTwoFactorChallenge,
   disableTwoFactor,
   verifyAccount,
   resendOtp,
@@ -1402,5 +1902,4 @@ module.exports = {
   getActiveSessions,
   revokeSession,
   logoutOtherDevices,
-  createGoogleTwoFactorChallenge,
 };

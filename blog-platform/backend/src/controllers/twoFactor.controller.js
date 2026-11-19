@@ -1,8 +1,10 @@
-
 const speakeasy = require("speakeasy");
 const QRCode = require("qrcode");
 const User = require("../models/user.model");
-
+const bcrypt = require("bcrypt");
+const {
+  decryptTwoFactorSecret,
+} = require("../utils/twoFactor.utils");
 const {
   encryptTwoFactorSecret,
 } = require("../utils/twoFactor.utils");
@@ -138,8 +140,20 @@ const verifyAndEnableTwoFactor = async (req, res) => {
 };
 
 
+
 const generateUserRecoveryCodes = async (req, res) => {
   try {
+    const { password, token } = req.body;
+
+    // 1. Check submitted information
+    if (!password || !/^\d{6}$/.test(String(token || ""))) {
+      return res.status(400).json({
+        success: false,
+        message: "Password and six-digit code are required",
+      });
+    }
+
+    // 2. Find the user
     const user = await User.findById(req.user.id).select(
       "+twoFactorRecoveryCodes"
     );
@@ -151,13 +165,47 @@ const generateUserRecoveryCodes = async (req, res) => {
       });
     }
 
-    if (!user.twoFactorEnabled) {
+    if (!user.twoFactorEnabled || !user.twoFactorSecret) {
       return res.status(400).json({
         success: false,
-        message: "Enable two-factor authentication first",
+        message: "Two-factor authentication is not enabled",
       });
     }
 
+    // 3. Verify password
+    const isPasswordCorrect = await bcrypt.compare(
+      password,
+      user.password
+    );
+
+    if (!isPasswordCorrect) {
+      return res.status(401).json({
+        success: false,
+        message: "Incorrect password",
+      });
+    }
+
+    // 4. Decrypt 2FA secret
+    const secret = decryptTwoFactorSecret(
+      user.twoFactorSecret
+    );
+
+    // 5. Verify authenticator code
+    const verified = speakeasy.totp.verify({
+      secret,
+      encoding: "base32",
+      token: String(token),
+      window: 1,
+    });
+
+    if (!verified) {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid authentication code",
+      });
+    }
+
+    // 6. Generate new recovery codes
     const { codes, hashedCodes } = generateRecoveryCodes();
 
     user.twoFactorRecoveryCodes = hashedCodes;
@@ -179,6 +227,7 @@ const generateUserRecoveryCodes = async (req, res) => {
     });
   }
 };
+
 
 
 module.exports = {

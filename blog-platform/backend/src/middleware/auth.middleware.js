@@ -1,6 +1,8 @@
-const jwt = require("jsonwebtoken");
 
-const protect = (req, res, next) => {
+const jwt = require("jsonwebtoken");
+const User = require("../models/user.model");
+
+const protect = async (req, res, next) => {
   try {
     const authHeader = req.headers.authorization;
 
@@ -13,18 +15,57 @@ const protect = (req, res, next) => {
 
     const token = authHeader.split(" ")[1];
 
-    const decoded = jwt.verify(
-      token,
-      process.env.JWT_SECRET
-    );
+    if (!token) {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid authentication token",
+      });
+    }
 
-    req.user = decoded;
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+    if (!decoded.id) {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid authentication token",
+      });
+    }
+
+    // Get the user's current information from MongoDB
+    const user = await User.findById(decoded.id).select("_id role");
+
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        message: "User no longer exists",
+      });
+    }
+
+    // Use the current database role, not the old JWT role
+    req.user = {
+      ...decoded,
+      id: user._id.toString(),
+      role: user.role,
+    };
 
     next();
   } catch (error) {
-    return res.status(401).json({
+    if (
+      error.name === "JsonWebTokenError" ||
+      error.name === "TokenExpiredError" ||
+      error.name === "NotBeforeError"
+    ) {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid or expired token",
+      });
+    }
+
+    console.error("Authentication middleware error:", error.message);
+
+    return res.status(500).json({
       success: false,
-      message: "Invalid or expired token",
+      message: "Authentication service temporarily unavailable",
     });
   }
 };

@@ -1,3 +1,4 @@
+
 const mongoose = require("mongoose");
 
 const verificationSchema = new mongoose.Schema(
@@ -6,11 +7,25 @@ const verificationSchema = new mongoose.Schema(
       type: String,
       required: true,
       unique: true,
+      lowercase: true,
+      trim: true,
     },
 
     otp: {
       type: String,
       required: true,
+    },
+
+    purpose: {
+      type: String,
+      enum: ["register", "password-reset"],
+      default: "register",
+      required: true,
+    },
+
+    attempts: {
+      type: Number,
+      default: 0,
     },
 
     expiresAt: {
@@ -21,6 +36,11 @@ const verificationSchema = new mongoose.Schema(
   {
     timestamps: true,
   }
+);
+
+verificationSchema.index(
+  { expiresAt: 1 },
+  { expireAfterSeconds: 0 }
 );
 
 const Verification = mongoose.model(
