@@ -98,7 +98,7 @@ const googleCallback = async (req, res) => {
       !payload.email ||
       payload.email_verified !== true
     ) {
-      return res.redirect("`${frontendUrl}/login`");
+      return res.redirect(`${frontendUrl}/login`);
     }
 
     const googleId = payload.sub;
@@ -113,7 +113,7 @@ const googleCallback = async (req, res) => {
 
       // Do not automatically link existing accounts
       if (existingUser) {
-        return res.redirect("`${frontendUrl}/login`");
+        return res.redirect(`${frontendUrl}/login`);
       }
 
       // Generate a random password
@@ -182,11 +182,15 @@ await session.withTransaction(async () => {
     });
 
     return res.redirect(`${frontendUrl}/google-success`);
-  } catch (error) {
-    console.error("Google authentication error:", error);
+  }catch (error) {
+  console.error("Google authentication error:", {
+    message: error.message,
+    code: error.code,
+    status: error.status,
+  });
 
-    return res.redirect(`${frontendUrl}/login`);
-  }
+  return res.redirect(`${frontendUrl}/login`);
+}
   finally {
   if (session) {
     await session.endSession();
