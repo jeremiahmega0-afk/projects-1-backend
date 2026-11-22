@@ -1,5 +1,6 @@
 const mongoose = require("mongoose");
 const Article = require("../models/article.model");
+const ArticleRevision = require("../models/articleRevision.model");
 const Category = require("../models/category.model");
 const ArticleView = require("../models/articleView.model");
 const slugify = require("slugify");
@@ -11,6 +12,10 @@ const {
   createArticleSchema,
   updateArticleSchema,
 } = require("../validations/article.validation");
+
+const {
+  scheduleArticleSchema,
+} = require("../validations/articleSchedule.validation");
 
 const createArticle = async (req, res) => {
   try {
@@ -95,6 +100,80 @@ const createArticle = async (req, res) => {
   }
 };
 
+
+const scheduleArticle = async (req, res) => {
+  try {
+    // 1. Validate the scheduled date
+    const validationResult = scheduleArticleSchema.safeParse(req.body);
+
+    if (!validationResult.success) {
+      return res.status(400).json({
+        success: false,
+        message: "Validation failed",
+        errors: validationResult.error.issues,
+      });
+    }
+
+    const { scheduledAt } = validationResult.data;
+
+    // 2. Validate the article ID
+    const { id } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid article ID",
+      });
+    }
+
+    // 3. Find the article
+    const article = await Article.findById(id);
+
+    if (!article) {
+      return res.status(404).json({
+        success: false,
+        message: "Article not found",
+      });
+    }
+
+    // 4. Check whether the logged-in user owns the article
+    if (article.author.toString() !== req.user.id.toString()) {
+      return res.status(403).json({
+        success: false,
+        message: "You can only schedule your own articles",
+      });
+    }
+
+    // 5. Only approved articles can be scheduled
+    if (article.status !== "approved") {
+      return res.status(400).json({
+        success: false,
+        message: "Only approved articles can be scheduled",
+      });
+    }
+
+    // 6. Save the schedule
+    article.status = "scheduled";
+    article.scheduledAt = new Date(scheduledAt);
+    article.publishedAt = null;
+
+    await article.save();
+
+    return res.status(200).json({
+      success: true,
+      message: "Article scheduled successfully",
+      article,
+    });
+  } catch (error) {
+    console.error(error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong",
+    });
+  }
+};
+
 const getArticles = async (req, res) => {
   try {
     const { search, category, tag, page = 1, limit = 10 } = req.query;
@@ -106,9 +185,10 @@ const getArticles = async (req, res) => {
       Math.max(1, Number(limit) || 10)
     );
 
-    // Always show published articles only
+    // Show only published articles that are not in the trash
     const filter = {
       status: "published",
+      isDeleted: false,
     };
 
 
@@ -189,6 +269,7 @@ const getArticleBySlug = async (req, res) => {
     const article = await Article.findOne({
       slug,
       status: "published",
+      isDeleted: false,
     });
 
     if (!article) {
@@ -355,7 +436,6 @@ const getArticleBySlug = async (req, res) => {
   }
 };
 
-
 const getRelatedArticles = async (req, res) => {
   try {
     const { slug } = req.params;
@@ -364,8 +444,8 @@ const getRelatedArticles = async (req, res) => {
     const article = await Article.findOne({
       slug,
       status: "published",
+      isDeleted: false,
     });
-
     if (!article) {
       return res.status(404).json({
         success: false,
@@ -386,6 +466,7 @@ const getRelatedArticles = async (req, res) => {
     const relatedArticles = await Article.find({
       category: article.category,
       status: "published",
+      isDeleted: false,
       _id: { $ne: article._id },
     })
       .select("title slug coverImage publishedAt views")
@@ -408,7 +489,6 @@ const getRelatedArticles = async (req, res) => {
     });
   }
 };
-
 
 const getMyArticleById = async (req, res) => {
   try {
@@ -513,6 +593,23 @@ const updateArticle = async (req, res) => {
     // Remember the old cover image before replacing it
     const oldCoverImagePublicId = article.coverImagePublicId;
 
+    // Capture the original article before making changes
+    const originalArticle = {
+      title: article.title,
+      content: article.content,
+      slug: article.slug,
+      coverImage: article.coverImage,
+      coverImagePublicId: article.coverImagePublicId,
+      category: article.category,
+      tags: [...article.tags],
+      metaTitle: article.metaTitle,
+      metaDescription: article.metaDescription,
+      canonicalUrl: article.canonicalUrl,
+      ogTitle: article.ogTitle,
+      ogDescription: article.ogDescription,
+      ogImage: article.ogImage,
+    };
+
     // 4. Check ownership BEFORE changing anything
     const articleAuthorId = article.author.toString();
     const loggedInUserId = req.user?.id?.toString();
@@ -616,10 +713,14 @@ const updateArticle = async (req, res) => {
       ogImage !== undefined;
 
 
-    // Send edited published articles back for review
-    if (article.status === "published" && contentChanged) {
+    // Send edited published or scheduled articles back for review
+    if (
+      ["published", "scheduled"].includes(article.status) &&
+      contentChanged
+    ) {
       article.status = "pending";
       article.publishedAt = null;
+      article.scheduledAt = null;
     }
 
     // Automatically refresh generated SEO metadata
@@ -697,10 +798,18 @@ const updateArticle = async (req, res) => {
     if (status !== undefined) {
       article.status = status;
 
-      if (status === "draft") {
+      if (["draft", "pending"].includes(status)) {
         article.publishedAt = null;
+        article.scheduledAt = null;
       }
     }
+
+    // Save the previous article version before updating it
+    await ArticleRevision.create({
+      article: article._id,
+      ...originalArticle,
+      editedBy: req.user.id,
+    });
 
     // 9. Save only after all checks pass
     await article.save();
@@ -738,8 +847,9 @@ const updateArticle = async (req, res) => {
 };
 
 
-const deleteArticle = async (req, res) => {
+const getArticleRevisions = async (req, res) => {
   try {
+    // 1. Validate the article ID
     const { id } = req.params;
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -749,6 +859,7 @@ const deleteArticle = async (req, res) => {
       });
     }
 
+    // 2. Find the article
     const article = await Article.findById(id);
 
     if (!article) {
@@ -758,6 +869,249 @@ const deleteArticle = async (req, res) => {
       });
     }
 
+    // 3. Check ownership
+    if (article.author.toString() !== req.user.id.toString()) {
+      return res.status(403).json({
+        success: false,
+        message: "You can only view revisions of your own articles",
+      });
+    }
+
+    // 4. Retrieve the article's previous versions
+    const revisions = await ArticleRevision.find({
+      article: article._id,
+    })
+      .populate("editedBy", "name username")
+      .sort({ createdAt: -1 });
+
+    // 5. Return the revision history
+    return res.status(200).json({
+      success: true,
+      count: revisions.length,
+      revisions,
+    });
+  } catch (error) {
+    console.error(error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong",
+    });
+  }
+};
+
+
+const restoreArticleRevision = async (req, res) => {
+  try {
+    // 1. Get article ID and revision ID
+    const { id, revisionId } = req.params;
+
+    // 2. Validate both IDs
+    if (
+      !mongoose.Types.ObjectId.isValid(id) ||
+      !mongoose.Types.ObjectId.isValid(revisionId)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid article or revision ID",
+      });
+    }
+
+    // 3. Find the article
+    const article = await Article.findById(id);
+
+    if (!article) {
+      return res.status(404).json({
+        success: false,
+        message: "Article not found",
+      });
+    }
+
+    // 4. Check article ownership
+    if (article.author.toString() !== req.user.id.toString()) {
+      return res.status(403).json({
+        success: false,
+        message: "You can only restore your own articles",
+      });
+    }
+
+    // 5. Find the selected revision
+    const revision = await ArticleRevision.findOne({
+      _id: revisionId,
+      article: article._id,
+    });
+
+    if (!revision) {
+      return res.status(404).json({
+        success: false,
+        message: "Article revision not found",
+      });
+    }
+
+    // Check whether another article already uses this slug
+    const existingArticle = await Article.findOne({
+      slug: revision.slug,
+      _id: { $ne: article._id },
+    });
+
+    if (existingArticle) {
+      return res.status(409).json({
+        success: false,
+        message: "Cannot restore this revision because its slug is already in use",
+      });
+    }
+
+    // 6. Save the current article before restoring
+    await ArticleRevision.create({
+      article: article._id,
+      title: article.title,
+      content: article.content,
+      slug: article.slug,
+      coverImage: article.coverImage,
+      coverImagePublicId: article.coverImagePublicId,
+      category: article.category,
+      tags: [...article.tags],
+      metaTitle: article.metaTitle,
+      metaDescription: article.metaDescription,
+      canonicalUrl: article.canonicalUrl,
+      ogTitle: article.ogTitle,
+      ogDescription: article.ogDescription,
+      ogImage: article.ogImage,
+      editedBy: req.user.id,
+    });
+
+    // 7. Restore the selected version
+    article.title = revision.title;
+    article.content = revision.content;
+    article.slug = revision.slug;
+    article.coverImage = revision.coverImage;
+    article.coverImagePublicId = revision.coverImagePublicId || "";
+    article.category = revision.category;
+    article.tags = [...revision.tags];
+    article.metaTitle = revision.metaTitle;
+    article.metaDescription = revision.metaDescription;
+    article.canonicalUrl = revision.canonicalUrl;
+    article.ogTitle = revision.ogTitle;
+    article.ogDescription = revision.ogDescription;
+    article.ogImage = revision.ogImage;
+
+    // Require approval for restored articles unless they are drafts
+    if (article.status !== "draft") {
+      article.status = "pending";
+    }
+
+    article.publishedAt = null;
+    article.scheduledAt = null;
+
+    // 9. Save the restored article
+    await article.save();
+
+    return res.status(200).json({
+      success: true,
+      message: "Article revision restored successfully",
+      article,
+    });
+  } catch (error) {
+    console.error(error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong",
+    });
+  }
+};
+
+
+const compareArticleRevisions = async (req, res) => {
+  try {
+    // 1. Get the article ID and two revision IDs
+    const { id } = req.params;
+    const { revision1, revision2 } = req.query;
+
+    // 2. Validate the IDs
+    if (
+      !mongoose.Types.ObjectId.isValid(id) ||
+      !mongoose.Types.ObjectId.isValid(revision1) ||
+      !mongoose.Types.ObjectId.isValid(revision2)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid article or revision ID",
+      });
+    }
+
+    // 3. Find the article
+    const article = await Article.findById(id);
+
+    if (!article) {
+      return res.status(404).json({
+        success: false,
+        message: "Article not found",
+      });
+    }
+
+    // 4. Check article ownership
+    if (article.author.toString() !== req.user.id.toString()) {
+      return res.status(403).json({
+        success: false,
+        message: "You can only compare revisions of your own articles",
+      });
+    }
+
+    // 5. Find both revisions
+    const revisions = await ArticleRevision.find({
+      article: article._id,
+      _id: { $in: [revision1, revision2] },
+    }).populate("editedBy", "name username");
+
+    // 6. Make sure both revisions exist
+    if (revisions.length !== 2) {
+      return res.status(404).json({
+        success: false,
+        message: "One or both article revisions were not found",
+      });
+    }
+
+    // 7. Return both revisions
+    return res.status(200).json({
+      success: true,
+      message: "Article revisions retrieved for comparison",
+      revisions,
+    });
+  } catch (error) {
+    console.error(error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong",
+    });
+  }
+};
+
+
+const deleteArticle = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // 1. Validate article ID
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid article ID",
+      });
+    }
+
+    // 2. Find the article
+    const article = await Article.findById(id);
+
+    if (!article) {
+      return res.status(404).json({
+        success: false,
+        message: "Article not found",
+      });
+    }
+
+    // 3. Check authentication
     const articleAuthorId = article.author.toString();
     const loggedInUserId = req.user?.id?.toString();
 
@@ -768,6 +1122,7 @@ const deleteArticle = async (req, res) => {
       });
     }
 
+    // 4. Check ownership
     if (articleAuthorId !== loggedInUserId) {
       return res.status(403).json({
         success: false,
@@ -775,28 +1130,30 @@ const deleteArticle = async (req, res) => {
       });
     }
 
-    // Delete the article from MongoDB first
-    await article.deleteOne();
-
-    // Delete its cover image from Cloudinary
-    if (article.coverImagePublicId) {
-      try {
-        await cloudinary.uploader.destroy(article.coverImagePublicId, {
-          resource_type: "image",
-        });
-
-        console.log("Article cover image deleted from Cloudinary");
-      } catch (cloudinaryError) {
-        console.error(
-          "Failed to delete article cover image from Cloudinary:",
-          cloudinaryError
-        );
-      }
+    // 5. Prevent deleting an article already in trash
+    if (article.isDeleted) {
+      return res.status(400).json({
+        success: false,
+        message: "Article is already in the trash",
+      });
     }
 
+    // 6. Move article to trash
+    article.isDeleted = true;
+    article.deletedAt = new Date();
+
+    await article.save();
+
+    // 7. Send success response
     return res.status(200).json({
       success: true,
-      message: "Article deleted successfully",
+      message: "Article moved to trash successfully",
+      article: {
+        id: article._id,
+        title: article.title,
+        isDeleted: article.isDeleted,
+        deletedAt: article.deletedAt,
+      },
     });
   } catch (error) {
     console.error(error);
@@ -854,14 +1211,15 @@ const approveArticle = async (req, res) => {
         message: "Only pending articles can be approved",
       });
     }
-    article.status = "published";
-    article.publishedAt = new Date();
+    article.status = "approved";
+    article.publishedAt = null;
+    article.scheduledAt = null;
 
     await article.save();
 
     return res.status(200).json({
       success: true,
-      message: "Article approved and published successfully",
+      message: "Article approved successfully. It can now be scheduled.",
       article,
     });
   } catch (error) {
@@ -903,6 +1261,7 @@ const rejectArticle = async (req, res) => {
 
     article.status = "rejected";
     article.publishedAt = null;
+    article.scheduledAt = null;
 
     await article.save();
 
@@ -1663,16 +2022,21 @@ const searchArticleSuggestions = async (req, res) => {
   }
 };
 
+
 module.exports = {
   createArticle,
   getArticles,
   getArticleBySlug,
+  getArticleRevisions,
+  restoreArticleRevision,
+  compareArticleRevisions,
   getMyArticleById,
   updateArticle,
   deleteArticle,
   getAllArticlesForAdmin,
   approveArticle,
   rejectArticle,
+  scheduleArticle,
   toggleArticleLike,
   toggleArticleReaction,
   getArticleStatistics,

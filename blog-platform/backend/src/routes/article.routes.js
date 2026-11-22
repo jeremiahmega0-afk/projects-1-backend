@@ -4,7 +4,11 @@ const protect = require("../middleware/auth.middleware");
 const authorize = require("../middleware/role.middleware");
 const {
   createArticle,
+  scheduleArticle,
   getArticles,
+  getArticleRevisions,
+  restoreArticleRevision,
+  compareArticleRevisions,
   getArticleBySlug,
   getMyArticleById,
   updateArticle,
@@ -60,6 +64,11 @@ const {
   createArticleSchema,
   updateArticleSchema,
 } = require("../validations/article.validation");
+
+const {
+  scheduleArticleSchema,
+} = require("../validations/articleSchedule.validation");
+
 const router = express.Router();
 
 router.post(
@@ -72,6 +81,21 @@ router.post(
 );
 router.get("/", getArticles);
 router.get("/my-articles/:id", protect, getMyArticleById);
+router.get(
+  "/:id/revisions",
+  protect,
+  getArticleRevisions
+);
+router.post(
+  "/:id/revisions/:revisionId/restore",
+  protect,
+  restoreArticleRevision
+);
+router.get(
+  "/:id/revisions/compare",
+  protect,
+  compareArticleRevisions
+);
 router.get(
   "/admin/all",
   protect,
@@ -165,6 +189,12 @@ router.patch(
   validate(updateArticleSchema),
   uploadCoverImage,
   updateArticle
+);
+router.patch(
+  "/:id/schedule",
+  protect,
+  validate(scheduleArticleSchema),
+  scheduleArticle
 );
 
 

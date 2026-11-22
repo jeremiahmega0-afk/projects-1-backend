@@ -94,7 +94,14 @@ const articleSchema = new mongoose.Schema(
 
     status: {
       type: String,
-      enum: ["draft", "pending", "published", "rejected", "scheduled"],
+      enum: [
+        "draft",
+        "pending",
+        "approved",
+        "scheduled",
+        "published",
+        "rejected",
+      ],
       default: "draft",
     },
 
@@ -104,6 +111,16 @@ const articleSchema = new mongoose.Schema(
     },
 
     scheduledAt: {
+      type: Date,
+      default: null,
+    },
+
+    isDeleted: {
+      type: Boolean,
+      default: false,
+    },
+
+    deletedAt: {
       type: Date,
       default: null,
     },
@@ -166,6 +183,15 @@ articleSchema.index(
       content: 1,
     },
     name: "article_text_search",
+  }
+);
+articleSchema.index(
+  {
+    status: 1,
+    scheduledAt: 1,
+  },
+  {
+    name: "article_status_scheduledAt",
   }
 );
 
