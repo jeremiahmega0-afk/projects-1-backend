@@ -22,6 +22,8 @@ const {
   getLeastViewedArticles,
   getViewsByDateRange,
   getRelatedArticles,
+  getAllArticleTags,
+  searchArticleSuggestions,
 } = require("../controllers/article.controller");
 const validate = require("../middleware/validate.middleware");
 const imageUpload = require("../uploads/imageUpload");
@@ -76,6 +78,8 @@ router.get(
   authorize("admin"),
   getAllArticlesForAdmin
 );
+router.get("/tags", getAllArticleTags);
+router.get("/search/suggestions", searchArticleSuggestions);
 router.patch(
   "/admin/:id/approve",
   protect,

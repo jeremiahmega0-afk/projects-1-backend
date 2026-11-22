@@ -5,6 +5,8 @@ const ArticleView = require("../models/articleView.model");
 const slugify = require("slugify");
 const cloudinary = require("../config/cloudinary");
 
+const { getClientUrl } = require("../utils/website-url.utils");
+
 const {
   createArticleSchema,
   updateArticleSchema,
@@ -22,7 +24,19 @@ const createArticle = async (req, res) => {
       });
     }
 
-    const { title, content, coverImage, category } = validationResult.data;
+    const {
+      title,
+      content,
+      coverImage,
+      category,
+      tags,
+      metaTitle,
+      metaDescription,
+      canonicalUrl,
+      ogTitle,
+      ogDescription,
+      ogImage,
+    } = validationResult.data;
 
     if (category) {
       const categoryExists = await Category.findById(category);
@@ -57,6 +71,13 @@ const createArticle = async (req, res) => {
       coverImagePublicId: req.body.coverImagePublicId || "",
       author: req.user.id,
       category,
+      tags: tags || [],
+      metaTitle: metaTitle || title.substring(0, 60),
+      metaDescription: metaDescription || content.substring(0, 160),
+      canonicalUrl: canonicalUrl || "",
+      ogTitle: ogTitle || title.substring(0, 95),
+      ogDescription: ogDescription || content.substring(0, 200),
+      ogImage: ogImage || coverImage || "",
     });
 
     res.status(201).json({
@@ -73,9 +94,10 @@ const createArticle = async (req, res) => {
     });
   }
 };
+
 const getArticles = async (req, res) => {
   try {
-    const { search, category, page = 1, limit = 10 } = req.query;
+    const { search, category, tag, page = 1, limit = 10 } = req.query;
 
     // Convert page and limit into numbers
     const pageNumber = Math.max(1, Number(page) || 1);
@@ -89,11 +111,11 @@ const getArticles = async (req, res) => {
       status: "published",
     };
 
-    // Search articles by title
-    if (search) {
-      filter.title = {
-        $regex: search,
-        $options: "i",
+
+    // Search articles by title, content, and tags
+    if (search && search.trim()) {
+      filter.$text = {
+        $search: search.trim(),
       };
     }
 
@@ -108,18 +130,36 @@ const getArticles = async (req, res) => {
 
       filter.category = category;
     }
+    // Filter articles by tag
+    if (tag && tag.trim()) {
+      filter.tags = tag.trim().toLowerCase();
+    }
 
     // Calculate how many articles to skip
     const skip = (pageNumber - 1) * limitNumber;
 
     // Get articles and total number of matching articles
+    const articleQuery = Article.find(
+      filter,
+      search && search.trim()
+        ? { score: { $meta: "textScore" } }
+        : {}
+    )
+      .populate("category", "name slug description")
+      .populate("author", "name email avatar")
+      .skip(skip)
+      .limit(limitNumber);
+
+    if (search && search.trim()) {
+      articleQuery.sort({
+        score: { $meta: "textScore" },
+      });
+    } else {
+      articleQuery.sort({ createdAt: -1 });
+    }
+
     const [articles, totalArticles] = await Promise.all([
-      Article.find(filter)
-        .populate("category", "name slug description")
-        .populate("author", "name email avatar")
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(limitNumber),
+      articleQuery,
 
       Article.countDocuments(filter),
     ]);
@@ -219,12 +259,90 @@ const getArticleBySlug = async (req, res) => {
     }
 
     const updatedArticle = await Article.findById(article._id)
-      .populate("author", "name email avatar");
+      .populate("author", "name username avatar bio")
+      .populate("category", "name slug description");
+
+    const articleUrl = `${getClientUrl()}/articles/${updatedArticle.slug}`;
+
+    const canonicalArticleUrl =
+      updatedArticle.canonicalUrl || articleUrl;
+
+    const structuredData = {
+      "@context": "https://schema.org",
+      "@type": "BlogPosting",
+      inLanguage: "en",
+      wordCount: updatedArticle.content.trim().split(/\s+/).length,
+
+      headline:
+        updatedArticle.ogTitle ||
+        updatedArticle.metaTitle ||
+        updatedArticle.title,
+
+      articleBody: updatedArticle.content,
+
+      description:
+        updatedArticle.ogDescription ||
+        updatedArticle.metaDescription ||
+        updatedArticle.content.substring(0, 160),
+
+      url: canonicalArticleUrl,
+
+      mainEntityOfPage: {
+        "@type": "WebPage",
+        "@id": canonicalArticleUrl,
+      },
+
+      datePublished: updatedArticle.publishedAt,
+      dateModified: updatedArticle.updatedAt,
+
+      author: {
+        "@type": "Person",
+        name:
+          updatedArticle.author?.name ||
+          updatedArticle.author?.username,
+
+        identifier: updatedArticle.author?.username,
+      },
+
+      publisher: {
+        "@type": "Organization",
+        name: "Jerry Blog Platform",
+        url: getClientUrl(),
+      },
+
+      copyrightHolder: {
+        "@type": "Person",
+        name:
+          updatedArticle.author?.name ||
+          updatedArticle.author?.username,
+      },
+
+      copyrightYear: updatedArticle.publishedAt
+        ? new Date(updatedArticle.publishedAt).getFullYear()
+        : undefined,
+
+      image:
+        updatedArticle.ogImage ||
+        updatedArticle.coverImage ||
+        undefined,
+
+      keywords: updatedArticle.tags,
+
+      articleSection: updatedArticle.category?.name || "General",
+
+      about: updatedArticle.category
+        ? {
+          "@type": "Thing",
+          name: updatedArticle.category.name,
+        }
+        : undefined,
+    };
 
     return res.status(200).json({
       success: true,
       viewCounted,
       article: updatedArticle,
+      structuredData,
     });
 
   } catch (error) {
@@ -338,6 +456,7 @@ const getMyArticleById = async (req, res) => {
     });
   }
 };
+
 const updateArticle = async (req, res) => {
   try {
     // 1. Remove the server-generated public ID before validating user input
@@ -362,6 +481,13 @@ const updateArticle = async (req, res) => {
       coverImage,
       category,
       status,
+      tags,
+      metaTitle,
+      metaDescription,
+      canonicalUrl,
+      ogTitle,
+      ogDescription,
+      ogImage,
     } = validationResult.data;
 
     // 2. Validate the article ID
@@ -453,17 +579,69 @@ const updateArticle = async (req, res) => {
       article.slug = newSlug;
     }
 
+    // Detect automatically generated SEO metadata BEFORE making changes
+
+    const shouldAutoUpdateMetaTitle =
+      !article.metaTitle ||
+      article.metaTitle === article.title.substring(0, 60);
+
+    const shouldAutoUpdateMetaDescription =
+      !article.metaDescription ||
+      article.metaDescription === article.content.substring(0, 160);
+
+    const shouldAutoUpdateOgTitle =
+      !article.ogTitle ||
+      article.ogTitle === article.title.substring(0, 95);
+
+    const shouldAutoUpdateOgDescription =
+      !article.ogDescription ||
+      article.ogDescription === article.content.substring(0, 200);
+
+    const shouldAutoUpdateOgImage =
+      !article.ogImage ||
+      article.ogImage === article.coverImage;
+
     // 7. Detect content changes
     const contentChanged =
       title !== undefined ||
       content !== undefined ||
       coverImage !== undefined ||
-      category !== undefined;
+      category !== undefined ||
+      tags !== undefined ||
+      metaTitle !== undefined ||
+      metaDescription !== undefined ||
+      canonicalUrl !== undefined ||
+      ogTitle !== undefined ||
+      ogDescription !== undefined ||
+      ogImage !== undefined;
+
 
     // Send edited published articles back for review
     if (article.status === "published" && contentChanged) {
       article.status = "pending";
       article.publishedAt = null;
+    }
+
+    // Automatically refresh generated SEO metadata
+
+    if (title !== undefined && shouldAutoUpdateMetaTitle) {
+      article.metaTitle = title.substring(0, 60);
+    }
+
+    if (content !== undefined && shouldAutoUpdateMetaDescription) {
+      article.metaDescription = content.substring(0, 160);
+    }
+
+    if (title !== undefined && shouldAutoUpdateOgTitle) {
+      article.ogTitle = title.substring(0, 95);
+    }
+
+    if (content !== undefined && shouldAutoUpdateOgDescription) {
+      article.ogDescription = content.substring(0, 200);
+    }
+
+    if (coverImage !== undefined && shouldAutoUpdateOgImage) {
+      article.ogImage = coverImage;
     }
 
     // 8. Apply permitted changes
@@ -486,6 +664,34 @@ const updateArticle = async (req, res) => {
 
     if (category !== undefined) {
       article.category = category || null;
+    }
+
+    if (tags !== undefined) {
+      article.tags = tags;
+    }
+
+    if (metaTitle !== undefined) {
+      article.metaTitle = metaTitle;
+    }
+
+    if (metaDescription !== undefined) {
+      article.metaDescription = metaDescription;
+    }
+
+    if (canonicalUrl !== undefined) {
+      article.canonicalUrl = canonicalUrl;
+    }
+
+    if (ogTitle !== undefined) {
+      article.ogTitle = ogTitle;
+    }
+
+    if (ogDescription !== undefined) {
+      article.ogDescription = ogDescription;
+    }
+
+    if (ogImage !== undefined) {
+      article.ogImage = ogImage;
     }
 
     if (status !== undefined) {
@@ -622,6 +828,7 @@ const getAllArticlesForAdmin = async (req, res) => {
     });
   }
 };
+
 const approveArticle = async (req, res) => {
   try {
     const { id } = req.params;
@@ -1280,6 +1487,181 @@ const getViewsByDateRange = async (req, res) => {
   }
 };
 
+const getAllArticleTags = async (req, res) => {
+  try {
+    // Get limit from query parameters
+    const requestedLimit = req.query.limit;
+
+    let limit = 10;
+
+    if (requestedLimit !== undefined) {
+      const parsedLimit = Number(requestedLimit);
+
+      if (
+        !Number.isInteger(parsedLimit) ||
+        parsedLimit < 1
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "Limit must be a positive whole number",
+        });
+      }
+
+      limit = Math.min(parsedLimit, 50);
+    }
+
+    const tags = await Article.aggregate([
+      // Only published articles
+      {
+        $match: {
+          status: "published",
+        },
+      },
+
+      // Separate each tag
+      {
+        $unwind: "$tags",
+      },
+
+      // Count articles using each tag
+      {
+        $group: {
+          _id: "$tags",
+          articleCount: {
+            $sum: 1,
+          },
+        },
+      },
+
+      // Most popular tags first
+      {
+        $sort: {
+          articleCount: -1,
+          _id: 1,
+        },
+      },
+
+      // Limit the number of results
+      {
+        $limit: limit,
+      },
+
+      // Format the response
+      {
+        $project: {
+          _id: 0,
+          name: "$_id",
+          articleCount: 1,
+        },
+      },
+    ]);
+
+    return res.status(200).json({
+      success: true,
+      count: tags.length,
+      tags,
+    });
+  } catch (error) {
+    console.error("Get article tags error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch article tags",
+    });
+  }
+};
+
+const searchArticleSuggestions = async (req, res) => {
+  try {
+    const search = req.query.search;
+
+    // Check whether search was provided
+    if (search === undefined) {
+      return res.status(400).json({
+        success: false,
+        message: "Search term is required",
+      });
+    }
+
+    // Ensure search is a single text value
+    if (typeof search !== "string") {
+      return res.status(400).json({
+        success: false,
+        message: "Search term must be a valid string",
+      });
+    }
+
+    // Search term cannot exceed 100 characters
+    if (search.length > 100) {
+      return res.status(400).json({
+        success: false,
+        message: "Search term cannot exceed 100 characters",
+      });
+    }
+
+    // Check whether search was provided
+    if (!search || !search.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: "Search term is required",
+      });
+    }
+
+    // Search must contain at least 2 characters
+    if (search.trim().length < 2) {
+      return res.status(400).json({
+        success: false,
+        message: "Search term must be at least 2 characters",
+      });
+    }
+
+    // Escape special characters before using search in a regular expression
+    const escapedSearch = search
+      .trim()
+      .replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+    // Find matching published article titles or tags
+    const suggestions = await Article.find({
+      status: "published",
+      $or: [
+        {
+          title: {
+            $regex: escapedSearch,
+            $options: "i",
+          },
+        },
+        {
+          tags: {
+            $regex: escapedSearch,
+            $options: "i",
+          },
+        },
+        {
+          content: {
+            $regex: escapedSearch,
+            $options: "i",
+          },
+        },
+      ],
+    })
+      .select("title slug")
+      .limit(5)
+      .sort({ createdAt: -1 });
+
+    return res.status(200).json({
+      success: true,
+      count: suggestions.length,
+      suggestions,
+    });
+  } catch (error) {
+    console.error("Article suggestion error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch search suggestions",
+    });
+  }
+};
 
 module.exports = {
   createArticle,
@@ -1301,4 +1683,6 @@ module.exports = {
   getLeastViewedArticles,
   getViewsByDateRange,
   getRelatedArticles,
+  getAllArticleTags,
+  searchArticleSuggestions,
 };
