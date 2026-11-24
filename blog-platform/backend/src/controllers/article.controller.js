@@ -3,6 +3,7 @@ const Article = require("../models/article.model");
 const ArticleRevision = require("../models/articleRevision.model");
 const Category = require("../models/category.model");
 const ArticleView = require("../models/articleView.model");
+const Comment = require("../models/comment.model");
 const slugify = require("slugify");
 const cloudinary = require("../config/cloudinary");
 
@@ -73,7 +74,7 @@ const createArticle = async (req, res) => {
       slug,
       content,
       coverImage: coverImage || "",
-      coverImagePublicId: req.body.coverImagePublicId || "",
+      coverImagePublicId: req.coverImagePublicId || "",
       author: req.user.id,
       category,
       tags: tags || [],
@@ -99,7 +100,6 @@ const createArticle = async (req, res) => {
     });
   }
 };
-
 
 const scheduleArticle = async (req, res) => {
   try {
@@ -188,7 +188,7 @@ const getArticles = async (req, res) => {
     // Show only published articles that are not in the trash
     const filter = {
       status: "published",
-      isDeleted: false,
+      isDeleted: { $ne: true },
     };
 
 
@@ -269,7 +269,7 @@ const getArticleBySlug = async (req, res) => {
     const article = await Article.findOne({
       slug,
       status: "published",
-      isDeleted: false,
+      isDeleted: { $ne: true },
     });
 
     if (!article) {
@@ -297,7 +297,11 @@ const getArticleBySlug = async (req, res) => {
 
           // Increase the article's view count.
           await Article.updateOne(
-            { _id: article._id, status: "published" },
+            {
+              _id: article._id,
+              status: "published",
+              isDeleted: { $ne: true },
+            },
             { $inc: { views: 1 } },
             { session }
           );
@@ -339,9 +343,20 @@ const getArticleBySlug = async (req, res) => {
       }
     }
 
-    const updatedArticle = await Article.findById(article._id)
+    const updatedArticle = await Article.findOne({
+      _id: article._id,
+      status: "published",
+      isDeleted: { $ne: true },
+    })
       .populate("author", "name username avatar bio")
       .populate("category", "name slug description");
+
+    if (!updatedArticle) {
+      return res.status(404).json({
+        success: false,
+        message: "Article not found",
+      });
+    }
 
     const articleUrl = `${getClientUrl()}/articles/${updatedArticle.slug}`;
 
@@ -444,7 +459,7 @@ const getRelatedArticles = async (req, res) => {
     const article = await Article.findOne({
       slug,
       status: "published",
-      isDeleted: false,
+      isDeleted: { $ne: true },
     });
     if (!article) {
       return res.status(404).json({
@@ -466,7 +481,7 @@ const getRelatedArticles = async (req, res) => {
     const relatedArticles = await Article.find({
       category: article.category,
       status: "published",
-      isDeleted: false,
+      isDeleted: { $ne: true },
       _id: { $ne: article._id },
     })
       .select("title slug coverImage publishedAt views")
@@ -503,7 +518,10 @@ const getMyArticleById = async (req, res) => {
     }
 
     // Find the article
-    const article = await Article.findById(id)
+    const article = await Article.findOne({
+      _id: id,
+      isDeleted: { $ne: true },
+    })
       .populate("category", "name slug description")
       .populate("author", "name email avatar");
 
@@ -536,6 +554,33 @@ const getMyArticleById = async (req, res) => {
     });
   }
 };
+
+
+const getMyTrash = async (req, res) => {
+  try {
+    const articles = await Article.find({
+      author: req.user.id,
+      isDeleted: true,
+    })
+      .populate("category", "name slug description")
+      .populate("author", "name username avatar")
+      .sort({ deletedAt: -1 });
+
+    return res.status(200).json({
+      success: true,
+      total: articles.length,
+      articles,
+    });
+  } catch (error) {
+    console.error("Get my trash error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong",
+    });
+  }
+};
+
 
 const updateArticle = async (req, res) => {
   try {
@@ -581,7 +626,10 @@ const updateArticle = async (req, res) => {
     }
 
     // 3. Find the article
-    const article = await Article.findById(id);
+    const article = await Article.findOne({
+      _id: id,
+      isDeleted: { $ne: true },
+    });
 
     if (!article) {
       return res.status(404).json({
@@ -700,17 +748,22 @@ const updateArticle = async (req, res) => {
 
     // 7. Detect content changes
     const contentChanged =
-      title !== undefined ||
-      content !== undefined ||
-      coverImage !== undefined ||
-      category !== undefined ||
-      tags !== undefined ||
-      metaTitle !== undefined ||
-      metaDescription !== undefined ||
-      canonicalUrl !== undefined ||
-      ogTitle !== undefined ||
-      ogDescription !== undefined ||
-      ogImage !== undefined;
+      (title !== undefined && title !== article.title) ||
+      (content !== undefined && content !== article.content) ||
+      (coverImage !== undefined && coverImage !== article.coverImage) ||
+      (category !== undefined &&
+        category !== article.category?.toString()) ||
+      (tags !== undefined &&
+        JSON.stringify(tags) !== JSON.stringify(article.tags)) ||
+      (metaTitle !== undefined && metaTitle !== article.metaTitle) ||
+      (metaDescription !== undefined &&
+        metaDescription !== article.metaDescription) ||
+      (canonicalUrl !== undefined &&
+        canonicalUrl !== article.canonicalUrl) ||
+      (ogTitle !== undefined && ogTitle !== article.ogTitle) ||
+      (ogDescription !== undefined &&
+        ogDescription !== article.ogDescription) ||
+      (ogImage !== undefined && ogImage !== article.ogImage);
 
 
     // Send edited published or scheduled articles back for review
@@ -759,8 +812,10 @@ const updateArticle = async (req, res) => {
     }
 
     // Save the new Cloudinary public ID when a new image is uploaded
-    if (req.file && req.body.coverImagePublicId) {
-      article.coverImagePublicId = req.body.coverImagePublicId;
+    // Save the new Cloudinary image URL and public ID
+    // Save the new Cloudinary public ID
+    if (req.file) {
+      article.coverImagePublicId = req.coverImagePublicId;
     }
 
     if (category !== undefined) {
@@ -805,31 +860,18 @@ const updateArticle = async (req, res) => {
     }
 
     // Save the previous article version before updating it
-    await ArticleRevision.create({
-      article: article._id,
-      ...originalArticle,
-      editedBy: req.user.id,
-    });
+    // Save the previous article version only when content changes
+    if (contentChanged) {
+      await ArticleRevision.create({
+        article: article._id,
+        ...originalArticle,
+        editedBy: req.user.id,
+      });
+    }
 
     // 9. Save only after all checks pass
     await article.save();
 
-    // Delete the old cover image after the new article data is saved
-    if (
-      req.file &&
-      oldCoverImagePublicId &&
-      oldCoverImagePublicId !== article.coverImagePublicId
-    ) {
-      try {
-        await cloudinary.uploader.destroy(oldCoverImagePublicId, {
-          resource_type: "image",
-        });
-
-        console.log("Old article cover image deleted successfully");
-      } catch (cloudinaryError) {
-        console.error("Failed to delete old article cover image:", cloudinaryError);
-      }
-    }
 
     return res.status(200).json({
       success: true,
@@ -846,7 +888,6 @@ const updateArticle = async (req, res) => {
   }
 };
 
-
 const getArticleRevisions = async (req, res) => {
   try {
     // 1. Validate the article ID
@@ -860,7 +901,10 @@ const getArticleRevisions = async (req, res) => {
     }
 
     // 2. Find the article
-    const article = await Article.findById(id);
+    const article = await Article.findOne({
+      _id: id,
+      isDeleted: { $ne: true },
+    });
 
     if (!article) {
       return res.status(404).json({
@@ -918,7 +962,10 @@ const restoreArticleRevision = async (req, res) => {
     }
 
     // 3. Find the article
-    const article = await Article.findById(id);
+    const article = await Article.findOne({
+      _id: id,
+      isDeleted: { $ne: true },
+    });
 
     if (!article) {
       return res.status(404).json({
@@ -1040,8 +1087,18 @@ const compareArticleRevisions = async (req, res) => {
       });
     }
 
+    if (revision1.toLowerCase() === revision2.toLowerCase()) {
+      return res.status(400).json({
+        success: false,
+        message: "Please provide two different revision IDs",
+      });
+    }
+
     // 3. Find the article
-    const article = await Article.findById(id);
+    const article = await Article.findOne({
+      _id: id,
+      isDeleted: { $ne: true },
+    });
 
     if (!article) {
       return res.status(404).json({
@@ -1087,7 +1144,6 @@ const compareArticleRevisions = async (req, res) => {
     });
   }
 };
-
 
 const deleteArticle = async (req, res) => {
   try {
@@ -1165,9 +1221,251 @@ const deleteArticle = async (req, res) => {
   }
 };
 
+
+const restoreDeletedArticle = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // 1. Validate article ID
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid article ID",
+      });
+    }
+
+    // 2. Find the article
+    const article = await Article.findById(id);
+
+    if (!article) {
+      return res.status(404).json({
+        success: false,
+        message: "Article not found",
+      });
+    }
+
+    // 3. Check authentication
+    const loggedInUserId = req.user?.id?.toString();
+
+    if (!loggedInUserId) {
+      return res.status(401).json({
+        success: false,
+        message: "Authentication required",
+      });
+    }
+
+    // 4. Check ownership
+    if (article.author.toString() !== loggedInUserId) {
+      return res.status(403).json({
+        success: false,
+        message: "You can only restore your own articles",
+      });
+    }
+
+    // 5. Check whether the article is in trash
+    if (!article.isDeleted) {
+      return res.status(400).json({
+        success: false,
+        message: "Article is not in the trash",
+      });
+    }
+
+    // 6. Restore the article
+    article.isDeleted = false;
+    article.deletedAt = null;
+
+    // Require approval before previously published or scheduled
+    // articles can become public again.
+    if (article.status !== "draft") {
+      article.status = "pending";
+    }
+
+    article.publishedAt = null;
+    article.scheduledAt = null;
+
+    await article.save();
+
+    // 7. Send success response
+    return res.status(200).json({
+      success: true,
+      message: "Article restored successfully",
+      article: {
+        id: article._id,
+        title: article.title,
+        status: article.status,
+        isDeleted: article.isDeleted,
+        deletedAt: article.deletedAt,
+      },
+    });
+  } catch (error) {
+    console.error("Restore deleted article error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong",
+    });
+  }
+};
+
+
+const permanentlyDeleteArticle = async (req, res) => {
+  let session;
+
+  try {
+    const { id } = req.params;
+
+    // 1. Validate article ID
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid article ID",
+      });
+    }
+
+    // 2. Find the article
+    const article = await Article.findOne({
+      _id: id,
+      isDeleted: true,
+    });
+
+    if (!article) {
+      return res.status(404).json({
+        success: false,
+        message: "Article not found in trash",
+      });
+    }
+
+    // 4. Remember Cloudinary image IDs
+    const imagePublicIds = new Set();
+
+    if (article.coverImagePublicId) {
+      imagePublicIds.add(article.coverImagePublicId);
+    }
+
+    // 5. Start a MongoDB transaction
+    session = await mongoose.startSession();
+
+    let audioPublicIds = [];
+
+    await session.withTransaction(async () => {
+      // Collect audio files belonging to this article
+      const comments = await Comment.find({
+        article: article._id,
+      })
+        .select("audioPublicId")
+        .session(session);
+
+      audioPublicIds = comments
+        .map((comment) => comment.audioPublicId)
+        .filter(Boolean);
+
+      // Collect image IDs from revision history
+      const revisions = await ArticleRevision.find({
+        article: article._id,
+      })
+        .select("coverImagePublicId")
+        .session(session);
+
+      revisions.forEach((revision) => {
+        if (revision.coverImagePublicId) {
+          imagePublicIds.add(revision.coverImagePublicId);
+        }
+      });
+
+      // Delete article revisions
+      await ArticleRevision.deleteMany(
+        { article: article._id },
+        { session }
+      );
+
+      // Delete article views
+      await ArticleView.deleteMany(
+        { article: article._id },
+        { session }
+      );
+
+      // Delete comments and nested replies
+      await Comment.deleteMany(
+        { article: article._id },
+        { session }
+      );
+
+      // Finally, delete the article itself
+      const result = await Article.deleteOne(
+        {
+          _id: article._id,
+          isDeleted: true,
+        },
+        { session }
+      );
+
+      if (result.deletedCount !== 1) {
+        throw new Error("Article could not be permanently deleted");
+      }
+    });
+
+    await session.endSession();
+    session = null;
+
+    // 6. Delete Cloudinary cover images
+    const cloudinaryResults = await Promise.allSettled([
+      ...Array.from(imagePublicIds).map((publicId) =>
+        cloudinary.uploader.destroy(publicId, {
+          resource_type: "image",
+        })
+      ),
+
+      // Audio files use the video resource type in Cloudinary
+      ...audioPublicIds.map((publicId) =>
+        cloudinary.uploader.destroy(publicId, {
+          resource_type: "video",
+        })
+      ),
+    ]);
+
+    const failedCleanupCount = cloudinaryResults.filter((result) => {
+      if (result.status === "rejected") {
+        return true;
+      }
+
+      return result.value.result !== "ok";
+    }).length;
+
+    if (failedCleanupCount > 0) {
+      console.error(
+        `${failedCleanupCount} Cloudinary files could not be deleted`
+      );
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: failedCleanupCount === 0
+        ? "Article permanently deleted successfully"
+        : "Article data deleted, but some Cloudinary files could not be deleted",
+      cloudinaryCleanup: {
+        attempted: cloudinaryResults.length,
+        failed: failedCleanupCount,
+      },
+    });
+  } catch (error) {
+    console.error("Permanent article deletion error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong",
+    });
+  } finally {
+    if (session) {
+      await session.endSession();
+    }
+  }
+};
+
 const getAllArticlesForAdmin = async (req, res) => {
   try {
-    const articles = await Article.find()
+    const articles = await Article.find({
+      isDeleted: { $ne: true },
+    })
       .populate("author", "name email avatar")
       .sort({ createdAt: -1 });
 
@@ -1516,18 +1814,21 @@ const toggleArticleReaction = async (req, res) => {
   }
 };
 
+
 const getArticleStatistics = async (req, res) => {
   try {
-    // Count all published articles.
+    // Count all published articles that are not in trash.
     const totalPublishedArticles = await Article.countDocuments({
       status: "published",
+      isDeleted: { $ne: true },
     });
 
-    // Calculate total views across published articles.
+    // Calculate total views across active published articles.
     const viewsResult = await Article.aggregate([
       {
         $match: {
           status: "published",
+          isDeleted: { $ne: true },
         },
       },
       {
@@ -1546,9 +1847,10 @@ const getArticleStatistics = async (req, res) => {
       ? viewsResult[0].totalViews
       : 0;
 
-    // Find the five most-viewed published articles.
+    // Find the five most-viewed active published articles.
     const mostViewedArticles = await Article.find({
       status: "published",
+      isDeleted: { $ne: true },
     })
       .select("title slug views publishedAt")
       .sort({ views: -1, createdAt: -1 })
@@ -1584,8 +1886,10 @@ const getSingleArticleStatistics = async (req, res) => {
     }
 
     // Find the article.
-    const article = await Article.findById(id)
-      .select("title slug status views likes reactions");
+    const article = await Article.findOne({
+      _id: id,
+      isDeleted: { $ne: true },
+    }).select("title slug status views likes reactions");
 
     // Check whether the article exists.
     if (!article) {
@@ -1629,10 +1933,32 @@ const getSingleArticleStatistics = async (req, res) => {
   }
 };
 
-
 const getDailyArticleViews = async (req, res) => {
   try {
+
     const dailyViews = await ArticleView.aggregate([
+      // Find the article belonging to each view
+      {
+        $lookup: {
+          from: "articles",
+          localField: "article",
+          foreignField: "_id",
+          as: "article",
+        },
+      },
+
+      // Convert the article array into an object
+      {
+        $unwind: "$article",
+      },
+
+      // Exclude articles in the trash
+      {
+        $match: {
+          "article.isDeleted": { $ne: true },
+        },
+      },
+
       {
         $group: {
           _id: {
@@ -1645,11 +1971,13 @@ const getDailyArticleViews = async (req, res) => {
           views: { $sum: 1 },
         },
       },
+
       {
         $sort: {
           _id: 1,
         },
       },
+
       {
         $project: {
           _id: 0,
@@ -1686,7 +2014,10 @@ const getSingleArticleDailyViews = async (req, res) => {
     }
 
     // Check whether the article exists.
-    const article = await Article.findById(id).select("title");
+    const article = await Article.findOne({
+      _id: id,
+      isDeleted: { $ne: true },
+    }).select("title");
 
     if (!article) {
       return res.status(404).json({
@@ -1748,6 +2079,7 @@ const getMostViewedArticles = async (req, res) => {
   try {
     const mostViewedArticles = await Article.find({
       status: "published",
+      isDeleted: { $ne: true },
     })
       .select("title slug coverImage views publishedAt")
       .sort({ views: -1, createdAt: -1 })
@@ -1773,6 +2105,7 @@ const getLeastViewedArticles = async (req, res) => {
   try {
     const leastViewedArticles = await Article.find({
       status: "published",
+      isDeleted: { $ne: true },
     })
       .select("title slug coverImage views publishedAt")
       .sort({ views: 1, createdAt: -1 })
@@ -1823,12 +2156,39 @@ const getViewsByDateRange = async (req, res) => {
     }
 
     // Count views within the selected date range.
-    const totalViews = await ArticleView.countDocuments({
-      createdAt: {
-        $gte: start,
-        $lte: end,
+    const viewsResult = await ArticleView.aggregate([
+      {
+        $match: {
+          createdAt: {
+            $gte: start,
+            $lte: end,
+          },
+        },
       },
-    });
+      {
+        $lookup: {
+          from: "articles",
+          localField: "article",
+          foreignField: "_id",
+          as: "article",
+        },
+      },
+      {
+        $unwind: "$article",
+      },
+      {
+        $match: {
+          "article.isDeleted": { $ne: true },
+        },
+      },
+      {
+        $count: "totalViews",
+      },
+    ]);
+
+    const totalViews = viewsResult.length > 0
+      ? viewsResult[0].totalViews
+      : 0;
 
     return res.status(200).json({
       success: true,
@@ -1874,6 +2234,7 @@ const getAllArticleTags = async (req, res) => {
       {
         $match: {
           status: "published",
+          isDeleted: { $ne: true },
         },
       },
 
@@ -1982,6 +2343,7 @@ const searchArticleSuggestions = async (req, res) => {
     // Find matching published article titles or tags
     const suggestions = await Article.find({
       status: "published",
+      isDeleted: { $ne: true },
       $or: [
         {
           title: {
@@ -2022,7 +2384,6 @@ const searchArticleSuggestions = async (req, res) => {
   }
 };
 
-
 module.exports = {
   createArticle,
   getArticles,
@@ -2031,8 +2392,11 @@ module.exports = {
   restoreArticleRevision,
   compareArticleRevisions,
   getMyArticleById,
+  getMyTrash,
   updateArticle,
   deleteArticle,
+  restoreDeletedArticle,
+  permanentlyDeleteArticle,
   getAllArticlesForAdmin,
   approveArticle,
   rejectArticle,

@@ -4,6 +4,8 @@ const protect = require("../middleware/auth.middleware");
 const authorize = require("../middleware/role.middleware");
 const {
   createArticle,
+  getMyTrash,
+  permanentlyDeleteArticle,
   scheduleArticle,
   getArticles,
   getArticleRevisions,
@@ -13,6 +15,7 @@ const {
   getMyArticleById,
   updateArticle,
   deleteArticle,
+  restoreDeletedArticle,
   getAllArticlesForAdmin,
   approveArticle,
   rejectArticle,
@@ -50,8 +53,8 @@ const uploadCoverImage = async (req, res, next) => {
       "blog-platform/articles"
     );
 
-    req.body.coverImage = uploadedImage.url;
-    req.body.coverImagePublicId = uploadedImage.publicId;
+   req.body.coverImage = uploadedImage.url;
+req.coverImagePublicId = uploadedImage.publicId;
 
     next();
   } catch (error) {
@@ -80,6 +83,7 @@ router.post(
   createArticle
 );
 router.get("/", getArticles);
+router.get("/trash", protect, getMyTrash);
 router.get("/my-articles/:id", protect, getMyArticleById);
 router.get(
   "/:id/revisions",
@@ -174,6 +178,12 @@ router.get(
   getSingleArticleDailyViews
 );
 
+router.delete(
+  "/admin/:id/permanent",
+  protect,
+  authorize("admin"),
+  permanentlyDeleteArticle
+);
 
 router.get(
   "/:slug/related",
@@ -186,8 +196,8 @@ router.patch(
   "/:id",
   protect,
   imageUpload.single("coverImage"),
-  validate(updateArticleSchema),
   uploadCoverImage,
+  validate(updateArticleSchema),
   updateArticle
 );
 router.patch(
@@ -200,6 +210,8 @@ router.patch(
 
 
 router.delete("/:id", protect, deleteArticle);
+
+router.patch("/:id/restore", protect, restoreDeletedArticle);
 
 router.post("/:articleId/like", protect, toggleArticleLike);
 

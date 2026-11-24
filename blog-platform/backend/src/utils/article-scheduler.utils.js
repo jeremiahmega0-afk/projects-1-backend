@@ -12,6 +12,7 @@ const startArticleScheduler = () => {
         const result = await Article.updateMany(
           {
             status: "scheduled",
+            isDeleted: { $ne: true },
             scheduledAt: { $lte: now },
           },
           {
