@@ -113,7 +113,7 @@ const updateCategory = async (req, res) => {
         slug,
         _id: { $ne: category._id },
       });
-
+      
       if (existingCategory) {
         return res.status(409).json({
           success: false,

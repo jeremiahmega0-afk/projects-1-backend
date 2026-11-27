@@ -14,6 +14,8 @@ const commentRoutes = require("./routes/comment.routes");
 const commentReportRoutes = require("./routes/commentReport.routes");
 const commentModerationRoutes = require("./routes/commentModeration.routes");
 const videoRoutes = require("./routes/video.routes");
+const bookmarkRoutes = require("./routes/bookmark.routes");
+const readingListRoutes = require("./routes/readingList.routes");
 
 const {
   notFound,
@@ -47,6 +49,8 @@ app.use("/api/v1/comments", commentRoutes);
 app.use("/api/v1/comment-reports", commentReportRoutes);
 app.use("/api/v1/comment-moderation", commentModerationRoutes);
 app.use("/api/v1/videos", videoRoutes);
+app.use("/api/v1/bookmarks", bookmarkRoutes);
+app.use("/api/v1/reading-lists", readingListRoutes);
 
 app.use(notFound);
 app.use(errorHandler);
